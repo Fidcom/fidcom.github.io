@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0f766e" />
+    <title>Estimador de Rieles Solares</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Solar rail estimator</p>
+        <h1>Estimador de rieles</h1>
+        <p class="subtitle">Calcula rieles, cortes, splices, patas y spans desde el teléfono.</p>
+      </div>
+      <button id="installButton" class="ghost-button" hidden>Instalar</button>
+    </header>
+
+    <main class="layout">
+      <section class="card input-card" aria-labelledby="inputsTitle">
+        <h2 id="inputsTitle">Entradas</h2>
+        <form id="railForm" class="form-grid">
+          <label>
+            <span>Cantidad de paneles</span>
+            <input id="panelCount" inputmode="numeric" min="1" step="1" type="number" required />
+          </label>
+          <label>
+            <span>Ancho del panel (in)</span>
+            <input id="panelWidth" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <label>
+            <span>Espacio entre paneles / clamp (in)</span>
+            <input id="clampGap" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <label>
+            <span>Exceso de riel por extremo (in)</span>
+            <input id="railExcess" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <label>
+            <span>Largo inicial del riel (in)</span>
+            <input id="stockRailLength" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <label>
+            <span>Rieles por fila</span>
+            <input id="railsPerRow" inputmode="numeric" min="1" step="1" type="number" required />
+          </label>
+          <label>
+            <span>Pata inicial/final desde borde (in)</span>
+            <input id="edgeLegOffset" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <label>
+            <span>Span máximo entre patas (in)</span>
+            <input id="maxLegSpan" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <div class="button-row">
+            <button type="submit" class="primary-button">Calcular</button>
+            <button type="button" id="copyButton" class="secondary-button">Copiar</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card results-card" aria-labelledby="resultsTitle">
+        <div class="results-heading">
+          <div>
+            <h2 id="resultsTitle">Resultado</h2>
+            <p id="summary" class="summary">Ingresa los datos y presiona Calcular.</p>
+          </div>
+        </div>
+        <div id="result" class="result-box" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <template id="emptyTemplate">
+      <div class="empty-state">
+        <strong>Ejemplo de uso</strong>
+        <p>Largo de riel = paneles + clamps + exceso de riel en ambos extremos.</p>
+        <p>Las patas usan su propia distancia desde borde y luego el span máximo.</p>
+      </div>
+    </template>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
