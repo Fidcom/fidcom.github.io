@@ -120,6 +120,95 @@ function adjacentLegs(splicePosition, legs) {
   return { left, right };
 }
 
+function buildRailSvg(plan) {
+  const width = 1000;
+  const leftPad = 44;
+  const railWidth = 912;
+  const x = (position) => leftPad + (position / plan.rowLength) * railWidth;
+  const railY = 104;
+  const railHeight = 24;
+  const panelStart = x(plan.railExcess);
+  const panelEnd = x(plan.rowLength - plan.railExcess);
+  const sectionRects = [];
+  let sectionStart = 0;
+
+  plan.cutLengths.forEach((cut, index) => {
+    const sectionEnd = sectionStart + cut;
+    sectionRects.push(
+      `<rect x="${x(sectionStart)}" y="${railY}" width="${x(sectionEnd) - x(sectionStart)}" height="${railHeight}" rx="8" class="rail-section section-${index % 2}" />`
+    );
+    sectionStart = sectionEnd;
+  });
+
+  const legMarks = plan.legPositions
+    .map((position, index) => {
+      const px = x(position);
+      const labelY = index % 2 === 0 ? 176 : 205;
+      return `
+        <g class="leg-mark">
+          <line x1="${px}" y1="${railY + railHeight}" x2="${px}" y2="168" />
+          <circle cx="${px}" cy="168" r="7" />
+          <text x="${px}" y="${labelY}">P${index + 1}</text>
+          <text x="${px}" y="${labelY + 14}" class="small-label">${round(position).toFixed(1)}</text>
+        </g>`;
+    })
+    .join("");
+
+  const spanLabels = plan.legPositions
+    .slice(0, -1)
+    .map((position, index) => {
+      const next = plan.legPositions[index + 1];
+      const mid = (x(position) + x(next)) / 2;
+      const y = index % 2 === 0 ? 80 : 64;
+      return `
+        <g class="span-mark">
+          <line x1="${x(position)}" y1="${y + 6}" x2="${x(next)}" y2="${y + 6}" />
+          <text x="${mid}" y="${y}">${round(next - position).toFixed(1)} in</text>
+        </g>`;
+    })
+    .join("");
+
+  const spliceMarks = plan.splicePositions
+    .map((position, index) => {
+      const px = x(position);
+      const { left, right } = adjacentLegs(position, plan.legPositions);
+      const leftText = left === null ? "--" : round(position - left).toFixed(1);
+      const rightText = right === null ? "--" : round(right - position).toFixed(1);
+      return `
+        <g class="splice-mark">
+          <line x1="${px}" y1="44" x2="${px}" y2="150" />
+          <path d="M ${px} ${railY - 12} l 10 10 l -10 10 l -10 -10 z" />
+          <text x="${px}" y="34">S${index + 1}</text>
+          <text x="${px}" y="50" class="small-label">${round(position).toFixed(1)}</text>
+          <text x="${px}" y="232" class="small-label">← ${leftText} | ${rightText} →</text>
+        </g>`;
+    })
+    .join("");
+
+  return `
+    <div class="rail-visual-wrap">
+      <svg class="rail-visual" viewBox="0 0 ${width} 250" role="img" aria-label="Diagrama visual del riel con patas, spans y splices">
+        <rect x="${leftPad}" y="18" width="${railWidth}" height="214" rx="18" class="visual-bg" />
+        <line x1="${leftPad}" y1="22" x2="${leftPad}" y2="228" class="edge-line" />
+        <line x1="${leftPad + railWidth}" y1="22" x2="${leftPad + railWidth}" y2="228" class="edge-line" />
+        <rect x="${panelStart}" y="88" width="${panelEnd - panelStart}" height="56" rx="10" class="panel-zone" />
+        <text x="${(panelStart + panelEnd) / 2}" y="82" class="zone-label">zona de paneles + clamps: ${format(plan.panelSpan)}</text>
+        ${sectionRects.join("")}
+        <text x="${leftPad}" y="154" class="small-label" text-anchor="start">0</text>
+        <text x="${leftPad + railWidth}" y="154" class="small-label" text-anchor="end">${round(plan.rowLength).toFixed(1)} in</text>
+        ${spanLabels}
+        ${spliceMarks}
+        ${legMarks}
+      </svg>
+      <div class="visual-legend">
+        <span><i class="legend-rail"></i> Secciones de riel</span>
+        <span><i class="legend-panel"></i> Paneles + clamps</span>
+        <span><i class="legend-leg"></i> Patas</span>
+        <span><i class="legend-splice"></i> Splice</span>
+      </div>
+    </div>`;
+}
+
 function renderPlan(plan) {
   summary.textContent = `Largo de fila: ${format(plan.rowLength)} | Rieles por fila: ${plan.railsPerRow} | Splices por riel: ${plan.splicesPerRail}`;
 
@@ -150,6 +239,10 @@ function renderPlan(plan) {
       <div class="metric"><span>Rieles iniciales / paralelo</span><strong>${plan.stockRailsPerRail}</strong></div>
       <div class="metric"><span>Splices / paralelo</span><strong>${plan.splicesPerRail}</strong></div>
       <div class="metric"><span>Primera/última pata</span><strong>${format(plan.edgeLegOffset)}</strong></div>
+    </div>
+    <div class="detail-panel visual-panel">
+      <h3>Vista visual del riel</h3>
+      ${buildRailSvg(plan)}
     </div>
     <div class="detail-panel">
       <h3>Plan de corte por cada riel paralelo</h3>

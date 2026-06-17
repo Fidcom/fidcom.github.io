@@ -188,6 +188,139 @@ button {
   font-size: 1rem;
 }
 
+.visual-panel {
+  overflow: hidden;
+}
+
+.rail-visual-wrap {
+  display: grid;
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.rail-visual {
+  min-width: 760px;
+  width: 100%;
+  height: auto;
+}
+
+.visual-bg {
+  fill: #f8fffd;
+  stroke: var(--line);
+}
+
+.panel-zone {
+  fill: rgba(245, 158, 11, 0.18);
+  stroke: rgba(245, 158, 11, 0.65);
+  stroke-dasharray: 8 6;
+}
+
+.rail-section {
+  stroke: #0f766e;
+  stroke-width: 2;
+}
+
+.section-0 {
+  fill: #0f766e;
+}
+
+.section-1 {
+  fill: #14b8a6;
+}
+
+.edge-line {
+  stroke: #94a3b8;
+  stroke-dasharray: 5 5;
+}
+
+.zone-label,
+.rail-visual text {
+  dominant-baseline: middle;
+  fill: #24413d;
+  font-size: 14px;
+  font-weight: 800;
+  text-anchor: middle;
+}
+
+.rail-visual .small-label {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.leg-mark line {
+  stroke: #134e4a;
+  stroke-width: 3;
+}
+
+.leg-mark circle {
+  fill: #f59e0b;
+  stroke: #7c2d12;
+  stroke-width: 2;
+}
+
+.splice-mark line {
+  stroke: #dc2626;
+  stroke-dasharray: 6 5;
+  stroke-width: 3;
+}
+
+.splice-mark path {
+  fill: #ef4444;
+  stroke: #7f1d1d;
+  stroke-width: 2;
+}
+
+.span-mark line {
+  stroke: #64748b;
+  stroke-width: 2;
+}
+
+.span-mark text {
+  fill: #334155;
+  font-size: 13px;
+}
+
+.visual-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 800;
+}
+
+.visual-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.visual-legend i {
+  display: inline-block;
+  height: 0.8rem;
+  width: 0.8rem;
+  border-radius: 999px;
+}
+
+.legend-rail {
+  background: #0f766e;
+}
+
+.legend-panel {
+  background: #f59e0b;
+}
+
+.legend-leg {
+  background: #facc15;
+  border: 1px solid #7c2d12;
+}
+
+.legend-splice {
+  background: #ef4444;
+}
+
 .rail-list,
 .splice-list,
 .notes {
