@@ -75,6 +75,15 @@
               <option value="64">1/64</option>
             </select>
           </label>
+          <div class="form-section-title">Layout entre rieles y filas</div>
+          <label>
+            <span>Distancia entre rieles paralelos (in)</span>
+            <input id="parallelRailSpacing" inputmode="text" type="text" required />
+          </label>
+          <label>
+            <span>Espacio entre filas de paneles (in)</span>
+            <input id="rowGap" inputmode="text" type="text" required />
+          </label>
           <div class="button-row">
             <button type="submit" class="primary-button">Calcular</button>
             <button type="button" id="copyButton" class="secondary-button">Copiar</button>
@@ -99,6 +108,7 @@
         <p>Largo de riel = paneles + clamps + exceso de riel en ambos extremos.</p>
         <p>Puedes escribir medidas como <strong>44.65</strong>, <strong>44 5/8</strong>, <strong>1/2</strong> o <strong>12-1/4</strong>.</p>
         <p>Las patas convergen desde los bordes hacia el splice o centro para evitar spans finales demasiado cortos.</p>
+        <p>También valida el espacio entre filas recomendado de 18–24 in y rieles paralelos de 48–60 in.</p>
       </div>
     </template>
 

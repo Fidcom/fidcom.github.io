@@ -351,6 +351,57 @@ button {
   color: #78350f;
 }
 
+.layout-panel {
+  background: linear-gradient(180deg, #fbfffe 0%, #f4fbf9 100%);
+}
+
+.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.layout-item {
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: #fff;
+  padding: 0.9rem;
+}
+
+.layout-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.layout-item strong {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 1.15rem;
+  color: var(--primary-dark);
+}
+
+.layout-item em {
+  display: block;
+  margin-top: 0.35rem;
+  font-style: normal;
+  font-size: 0.83rem;
+  font-weight: 800;
+}
+
+.status-ok {
+  color: #166534;
+}
+
+.status-warn {
+  color: #92400e;
+}
+
+.status-bad {
+  color: #b91c1c;
+}
+
 .leg-table {
   width: 100%;
   border-collapse: collapse;
@@ -399,6 +450,10 @@ button {
 
   .metric-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .layout-grid {
+    grid-template-columns: 1fr;
   }
 }
 

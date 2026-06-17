@@ -12,6 +12,8 @@ const defaults = {
   maxLegSpan: "60",
   outputFormat: "decimal",
   fractionDenominator: "16",
+  parallelRailSpacing: "54",
+  rowGap: "20",
 };
 
 const fields = Object.keys(defaults);
@@ -173,6 +175,8 @@ function calculatePlan(values) {
   if (values.stockRailLength <= 0) throw new Error("El largo inicial del riel debe ser mayor que 0.");
   if (values.railsPerRow <= 0) throw new Error("La cantidad de rieles por fila debe ser mayor que 0.");
   if (values.minSpliceLegDistance < 0) throw new Error("La distancia mínima splice-pata no puede ser negativa.");
+  if (values.parallelRailSpacing <= 0) throw new Error("La distancia entre rieles paralelos debe ser mayor que 0.");
+  if (values.rowGap < 0) throw new Error("El espacio entre filas no puede ser negativo.");
 
   const panelSpan = values.panelCount * values.panelWidth + (values.panelCount - 1) * values.clampGap;
   const rowLength = panelSpan + 2 * values.railExcess;
@@ -220,6 +224,12 @@ function adjacentLegs(splicePosition, legs) {
   const left = legs.filter((position) => position < splicePosition).at(-1) ?? null;
   const right = legs.find((position) => position > splicePosition) ?? null;
   return { left, right };
+}
+
+function rangeStatus(value, min, max) {
+  if (value < min) return { className: "bad", text: `Bajo: recomendado ${format(min)}–${format(max)}` };
+  if (value > max) return { className: "warn", text: `Alto: recomendado ${format(min)}–${format(max)}` };
+  return { className: "ok", text: `Dentro del rango recomendado ${format(min)}–${format(max)}` };
 }
 
 function buildRailSvg(plan) {
@@ -338,6 +348,8 @@ function renderPlan(plan) {
         .map((warning) => `<li>${warning}</li>`)
         .join("")}</ul></div>`
     : "";
+  const railSpacingStatus = rangeStatus(plan.parallelRailSpacing, 48, 60);
+  const rowGapStatus = rangeStatus(plan.rowGap, 18, 24);
 
   result.innerHTML = `
     <div class="metric-grid">
@@ -353,6 +365,21 @@ function renderPlan(plan) {
     <div class="detail-panel visual-panel">
       <h3>Vista visual del riel</h3>
       ${buildRailSvg(plan)}
+    </div>
+    <div class="detail-panel layout-panel">
+      <h3>Layout entre rieles y filas</h3>
+      <div class="layout-grid">
+        <div class="layout-item">
+          <span>Distancia entre rieles paralelos de la misma fila</span>
+          <strong>${format(plan.parallelRailSpacing)}</strong>
+          <em class="status-${railSpacingStatus.className}">${railSpacingStatus.text}</em>
+        </div>
+        <div class="layout-item">
+          <span>Gap entre bordes de paneles de filas consecutivas</span>
+          <strong>${format(plan.rowGap)}</strong>
+          <em class="status-${rowGapStatus.className}">${rowGapStatus.text}</em>
+        </div>
+      </div>
     </div>
     <div class="detail-panel">
       <h3>Plan de corte por cada riel paralelo</h3>
@@ -376,6 +403,8 @@ function renderPlan(plan) {
         <li>El centro del splice se asume en la unión entre secciones de riel inicial.</li>
         <li>Las patas se balancean por tramos desde los bordes hacia el splice o centro para evitar un span final demasiado corto.</li>
         <li>Cuando hay splice, se sugieren patas adyacentes a la distancia mínima configurada a ambos lados del centro del splice.</li>
+        <li>El gap entre filas se mide entre bordes de paneles, no entre rieles.</li>
+        <li>La distancia entre rieles paralelos corresponde al espaciamiento transversal dentro de la misma fila.</li>
         <li>El mismo patrón aplica a los rieles paralelos de la fila.</li>
       </ul>
     </div>
@@ -392,6 +421,8 @@ function buildPlainText(plan) {
     `Rieles iniciales por paralelo: ${plan.stockRailsPerRail}`,
     `Splices por paralelo: ${plan.splicesPerRail}`,
     `Distancia mínima splice-pata: ${format(plan.minSpliceLegDistance)}`,
+    `Distancia entre rieles paralelos: ${format(plan.parallelRailSpacing)}`,
+    `Gap entre filas de paneles: ${format(plan.rowGap)}`,
     "",
     "Cortes:",
     ...plan.cutLengths.map((cut, index) => `- Sección ${index + 1}: ${format(cut)}`),
@@ -431,6 +462,8 @@ function getValues() {
     edgeLegOffset: readNumber("edgeLegOffset"),
     minSpliceLegDistance: readNumber("minSpliceLegDistance"),
     maxLegSpan: readNumber("maxLegSpan"),
+    parallelRailSpacing: readNumber("parallelRailSpacing"),
+    rowGap: readNumber("rowGap"),
   };
 }
 
