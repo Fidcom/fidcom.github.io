@@ -14,6 +14,8 @@ const defaults = {
   fractionDenominator: "16",
   parallelRailSpacing: "54",
   rowGap: "20",
+  panelLength: "89.685",
+  tiltDeg: "10",
 };
 
 const fields = Object.keys(defaults);
@@ -177,6 +179,8 @@ function calculatePlan(values) {
   if (values.minSpliceLegDistance < 0) throw new Error("La distancia mínima splice-pata no puede ser negativa.");
   if (values.parallelRailSpacing <= 0) throw new Error("La distancia entre rieles paralelos debe ser mayor que 0.");
   if (values.rowGap < 0) throw new Error("El espacio entre filas no puede ser negativo.");
+  if (values.panelLength <= 0) throw new Error("El largo del panel debe ser mayor que 0.");
+  if (values.tiltDeg < 0 || values.tiltDeg >= 90) throw new Error("El tilt debe estar entre 0 y menos de 90 grados.");
 
   const panelSpan = values.panelCount * values.panelWidth + (values.panelCount - 1) * values.clampGap;
   const rowLength = panelSpan + 2 * values.railExcess;
@@ -230,6 +234,29 @@ function rangeStatus(value, min, max) {
   if (value < min) return { className: "bad", text: `Bajo: recomendado ${format(min)}–${format(max)}` };
   if (value > max) return { className: "warn", text: `Alto: recomendado ${format(min)}–${format(max)}` };
   return { className: "ok", text: `Dentro del rango recomendado ${format(min)}–${format(max)}` };
+}
+
+function calculateCrossRowLayout(plan) {
+  const tiltRadians = (plan.tiltDeg * Math.PI) / 180;
+  const cosTilt = Math.cos(tiltRadians);
+  const sinTilt = Math.sin(tiltRadians);
+  const panelProjection = plan.panelLength * cosTilt;
+  const panelRise = plan.panelLength * sinTilt;
+  const railEdgeSetback = Math.max(0, (plan.panelLength - plan.parallelRailSpacing) / 2);
+  const railEdgeSetbackProjection = railEdgeSetback * cosTilt;
+  const sameRowRailProjection = plan.parallelRailSpacing * cosTilt;
+  const betweenRowsAdjacentRailFeet = plan.rowGap + 2 * railEdgeSetbackProjection;
+  const rowPitchEdgeToEdge = panelProjection + plan.rowGap;
+
+  return {
+    panelProjection,
+    panelRise,
+    railEdgeSetback,
+    railEdgeSetbackProjection,
+    sameRowRailProjection,
+    betweenRowsAdjacentRailFeet,
+    rowPitchEdgeToEdge,
+  };
 }
 
 function buildRailSvg(plan) {
@@ -350,6 +377,7 @@ function renderPlan(plan) {
     : "";
   const railSpacingStatus = rangeStatus(plan.parallelRailSpacing, 48, 60);
   const rowGapStatus = rangeStatus(plan.rowGap, 18, 24);
+  const crossRow = calculateCrossRowLayout(plan);
 
   result.innerHTML = `
     <div class="metric-grid">
@@ -379,6 +407,26 @@ function renderPlan(plan) {
           <strong>${format(plan.rowGap)}</strong>
           <em class="status-${rowGapStatus.className}">${rowGapStatus.text}</em>
         </div>
+        <div class="layout-item">
+          <span>Panel proyectado horizontalmente por tilt ${round(plan.tiltDeg).toFixed(2)}°</span>
+          <strong>${format(crossRow.panelProjection)}</strong>
+          <em>Altura aproximada del borde alto: ${format(crossRow.panelRise)}</em>
+        </div>
+        <div class="layout-item">
+          <span>Distancia proyectada entre rieles/patas de la misma fila</span>
+          <strong>${format(crossRow.sameRowRailProjection)}</strong>
+          <em>Basado en ${format(plan.parallelRailSpacing)} sobre el plano inclinado</em>
+        </div>
+        <div class="layout-item">
+          <span>Distancia entre patas/rieles adyacentes de filas consecutivas</span>
+          <strong>${format(crossRow.betweenRowsAdjacentRailFeet)}</strong>
+          <em>Gap + setback proyectado de riel a borde de panel en ambas filas</em>
+        </div>
+        <div class="layout-item">
+          <span>Pitch de fila borde-a-borde proyectado</span>
+          <strong>${format(crossRow.rowPitchEdgeToEdge)}</strong>
+          <em>Proyección del panel + gap entre filas</em>
+        </div>
       </div>
     </div>
     <div class="detail-panel">
@@ -405,6 +453,7 @@ function renderPlan(plan) {
         <li>Cuando hay splice, se sugieren patas adyacentes a la distancia mínima configurada a ambos lados del centro del splice.</li>
         <li>El gap entre filas se mide entre bordes de paneles, no entre rieles.</li>
         <li>La distancia entre rieles paralelos corresponde al espaciamiento transversal dentro de la misma fila.</li>
+        <li>La distancia entre patas de filas consecutivas se calcula con el panel en tilt y su proyección horizontal.</li>
         <li>El mismo patrón aplica a los rieles paralelos de la fila.</li>
       </ul>
     </div>
@@ -414,6 +463,7 @@ function renderPlan(plan) {
 }
 
 function buildPlainText(plan) {
+  const crossRow = calculateCrossRowLayout(plan);
   const lines = [
     `Largo ocupado por paneles + clamps: ${format(plan.panelSpan)}`,
     `Largo requerido por fila: ${format(plan.rowLength)}`,
@@ -423,6 +473,9 @@ function buildPlainText(plan) {
     `Distancia mínima splice-pata: ${format(plan.minSpliceLegDistance)}`,
     `Distancia entre rieles paralelos: ${format(plan.parallelRailSpacing)}`,
     `Gap entre filas de paneles: ${format(plan.rowGap)}`,
+    `Panel proyectado por tilt ${round(plan.tiltDeg).toFixed(2)}°: ${format(crossRow.panelProjection)}`,
+    `Distancia proyectada entre rieles de la misma fila: ${format(crossRow.sameRowRailProjection)}`,
+    `Distancia entre filas consecutivas de patas/rieles: ${format(crossRow.betweenRowsAdjacentRailFeet)}`,
     "",
     "Cortes:",
     ...plan.cutLengths.map((cut, index) => `- Sección ${index + 1}: ${format(cut)}`),
@@ -464,6 +517,8 @@ function getValues() {
     maxLegSpan: readNumber("maxLegSpan"),
     parallelRailSpacing: readNumber("parallelRailSpacing"),
     rowGap: readNumber("rowGap"),
+    panelLength: readNumber("panelLength"),
+    tiltDeg: readNumber("tiltDeg"),
   };
 }
 
