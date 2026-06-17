@@ -52,6 +52,10 @@
             <input id="edgeLegOffset" inputmode="decimal" min="0" step="0.001" type="number" required />
           </label>
           <label>
+            <span>Distancia mínima splice-pata (in)</span>
+            <input id="minSpliceLegDistance" inputmode="decimal" min="0" step="0.001" type="number" required />
+          </label>
+          <label>
             <span>Span máximo entre patas (in)</span>
             <input id="maxLegSpan" inputmode="decimal" min="0" step="0.001" type="number" required />
           </label>
@@ -77,7 +81,7 @@
       <div class="empty-state">
         <strong>Ejemplo de uso</strong>
         <p>Largo de riel = paneles + clamps + exceso de riel en ambos extremos.</p>
-        <p>Las patas usan su propia distancia desde borde y luego el span máximo.</p>
+        <p>Las patas convergen desde los bordes hacia el splice o centro para evitar spans finales demasiado cortos.</p>
       </div>
     </template>
 

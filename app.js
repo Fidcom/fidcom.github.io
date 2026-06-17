@@ -8,6 +8,7 @@ const defaults = {
   stockRailLength: "185.25",
   railsPerRow: "2",
   edgeLegOffset: "12",
+  minSpliceLegDistance: "12",
   maxLegSpan: "60",
 };
 
@@ -46,29 +47,59 @@ function readInteger(id) {
   return value;
 }
 
-function calculateLegPositions(totalLength, edgeOffset, maxSpan) {
+function distributeBetweenAnchors(start, end, maxSpan) {
+  const length = end - start;
+  if (length <= 0) return [];
+
+  const spanCount = Math.max(1, Math.ceil(length / maxSpan));
+  const balancedSpan = length / spanCount;
+  const points = [];
+  for (let index = 1; index < spanCount; index += 1) {
+    points.push(round(start + balancedSpan * index));
+  }
+  return points;
+}
+
+function calculateLegPositions(totalLength, edgeOffset, maxSpan, splicePositions, minSpliceLegDistance) {
   if (maxSpan <= 0) throw new Error("El span entre patas debe ser mayor que 0.");
   if (edgeOffset < 0) throw new Error("La posición inicial de patas no puede ser negativa.");
+  if (minSpliceLegDistance < 0) throw new Error("La distancia mínima splice-pata no puede ser negativa.");
   if (totalLength < edgeOffset * 2) {
     throw new Error("El largo total es menor que el doble de la posición inicial de patas.");
   }
 
   const start = edgeOffset;
   const end = totalLength - edgeOffset;
-  const positions = [round(start)];
-  let current = start;
+  const warnings = [];
+  const anchors = [start];
 
-  while (current + maxSpan < end) {
-    current += maxSpan;
-    positions.push(round(current));
+  splicePositions.forEach((splice, index) => {
+    const left = splice - minSpliceLegDistance;
+    const right = splice + minSpliceLegDistance;
+    if (left <= start || right >= end || left >= right) {
+      warnings.push(
+        `Splice ${index + 1}: no hay espacio suficiente para colocar patas a ${format(minSpliceLegDistance)} del centro.`
+      );
+      return;
+    }
+    anchors.push(left, right);
+  });
+
+  anchors.push(end);
+  const sortedAnchors = [...new Set(anchors.map(round))].sort((a, b) => a - b);
+  const positions = [sortedAnchors[0]];
+
+  for (let index = 0; index < sortedAnchors.length - 1; index += 1) {
+    const sectionStart = sortedAnchors[index];
+    const sectionEnd = sortedAnchors[index + 1];
+    positions.push(...distributeBetweenAnchors(sectionStart, sectionEnd, maxSpan));
+    positions.push(sectionEnd);
   }
 
-  if (positions.at(-1) !== round(end)) {
-    positions.push(round(end));
-  }
+  const uniquePositions = [...new Set(positions.map(round))].sort((a, b) => a - b);
+  const spans = uniquePositions.slice(0, -1).map((position, index) => round(uniquePositions[index + 1] - position));
 
-  const spans = positions.slice(0, -1).map((position, index) => round(positions[index + 1] - position));
-  return { positions, spans };
+  return { positions: uniquePositions, spans, warnings };
 }
 
 function calculatePlan(values) {
@@ -78,6 +109,7 @@ function calculatePlan(values) {
   if (values.railExcess < 0) throw new Error("El exceso de riel en extremos no puede ser negativo.");
   if (values.stockRailLength <= 0) throw new Error("El largo inicial del riel debe ser mayor que 0.");
   if (values.railsPerRow <= 0) throw new Error("La cantidad de rieles por fila debe ser mayor que 0.");
+  if (values.minSpliceLegDistance < 0) throw new Error("La distancia mínima splice-pata no puede ser negativa.");
 
   const panelSpan = values.panelCount * values.panelWidth + (values.panelCount - 1) * values.clampGap;
   const rowLength = panelSpan + 2 * values.railExcess;
@@ -98,7 +130,13 @@ function calculatePlan(values) {
     if (position < rowLength) splicePositions.push(round(position));
   }
 
-  const legs = calculateLegPositions(rowLength, values.edgeLegOffset, values.maxLegSpan);
+  const legs = calculateLegPositions(
+    rowLength,
+    values.edgeLegOffset,
+    values.maxLegSpan,
+    splicePositions,
+    values.minSpliceLegDistance
+  );
 
   return {
     ...values,
@@ -111,6 +149,7 @@ function calculatePlan(values) {
     splicePositions,
     legPositions: legs.positions,
     legSpans: legs.spans,
+    warnings: legs.warnings,
   };
 }
 
@@ -231,6 +270,12 @@ function renderPlan(plan) {
         .join("")
     : `<li>No requiere splice; el largo cabe en un riel inicial.</li>`;
 
+  const warningHtml = plan.warnings.length
+    ? `<div class="detail-panel warning-panel"><h3>Avisos</h3><ul class="notes">${plan.warnings
+        .map((warning) => `<li>${warning}</li>`)
+        .join("")}</ul></div>`
+    : "";
+
   result.innerHTML = `
     <div class="metric-grid">
       <div class="metric"><span>Paneles + clamps</span><strong>${format(plan.panelSpan)}</strong></div>
@@ -239,7 +284,9 @@ function renderPlan(plan) {
       <div class="metric"><span>Rieles iniciales / paralelo</span><strong>${plan.stockRailsPerRail}</strong></div>
       <div class="metric"><span>Splices / paralelo</span><strong>${plan.splicesPerRail}</strong></div>
       <div class="metric"><span>Primera/última pata</span><strong>${format(plan.edgeLegOffset)}</strong></div>
+      <div class="metric"><span>Mín. splice-pata</span><strong>${format(plan.minSpliceLegDistance)}</strong></div>
     </div>
+    ${warningHtml}
     <div class="detail-panel visual-panel">
       <h3>Vista visual del riel</h3>
       ${buildRailSvg(plan)}
@@ -264,6 +311,8 @@ function renderPlan(plan) {
       <ul class="notes">
         <li>El exceso de riel para paneles es independiente de la posición de patas extremas.</li>
         <li>El centro del splice se asume en la unión entre secciones de riel inicial.</li>
+        <li>Las patas se balancean por tramos desde los bordes hacia el splice o centro para evitar un span final demasiado corto.</li>
+        <li>Cuando hay splice, se sugieren patas adyacentes a la distancia mínima configurada a ambos lados del centro del splice.</li>
         <li>El mismo patrón aplica a los rieles paralelos de la fila.</li>
       </ul>
     </div>
@@ -279,6 +328,7 @@ function buildPlainText(plan) {
     `Largo total instalado (${plan.railsPerRow} rieles): ${format(plan.totalRailLengthPerRow)}`,
     `Rieles iniciales por paralelo: ${plan.stockRailsPerRail}`,
     `Splices por paralelo: ${plan.splicesPerRail}`,
+    `Distancia mínima splice-pata: ${format(plan.minSpliceLegDistance)}`,
     "",
     "Cortes:",
     ...plan.cutLengths.map((cut, index) => `- Sección ${index + 1}: ${format(cut)}`),
@@ -300,6 +350,10 @@ function buildPlainText(plan) {
     });
   }
 
+  if (plan.warnings.length) {
+    lines.push("", "Avisos:", ...plan.warnings.map((warning) => `- ${warning}`));
+  }
+
   return lines.join("\n");
 }
 
@@ -312,6 +366,7 @@ function getValues() {
     stockRailLength: readNumber("stockRailLength"),
     railsPerRow: readInteger("railsPerRow"),
     edgeLegOffset: readNumber("edgeLegOffset"),
+    minSpliceLegDistance: readNumber("minSpliceLegDistance"),
     maxLegSpan: readNumber("maxLegSpan"),
   };
 }

@@ -1,4 +1,4 @@
-const CACHE_NAME = "rail-estimator-v2";
+const CACHE_NAME = "rail-estimator-v3";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {

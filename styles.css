@@ -339,6 +339,16 @@ button {
   padding: 0.65rem 0.75rem;
 }
 
+.warning-panel {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: #fffbeb;
+}
+
+.warning-panel .notes li {
+  background: #fef3c7;
+  color: #78350f;
+}
+
 .leg-table {
   width: 100%;
   border-collapse: collapse;
