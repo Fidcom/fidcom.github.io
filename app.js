@@ -10,6 +10,8 @@ const defaults = {
   edgeLegOffset: "12",
   minSpliceLegDistance: "12",
   maxLegSpan: "60",
+  outputFormat: "decimal",
+  fractionDenominator: "16",
 };
 
 const fields = Object.keys(defaults);
@@ -26,13 +28,74 @@ function round(value) {
   return Math.round((value + Number.EPSILON) * 1000) / 1000;
 }
 
+function gcd(a, b) {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y) {
+    [x, y] = [y, x % y];
+  }
+  return x || 1;
+}
+
+function parseMeasurement(rawValue) {
+  const value = String(rawValue).trim().replace(/,/g, ".").replace(/-/g, " ");
+  if (!value) return Number.NaN;
+
+  const parts = value.split(/\s+/);
+  let total = 0;
+
+  for (const part of parts) {
+    if (part.includes("/")) {
+      const [numeratorText, denominatorText] = part.split("/");
+      const numerator = Number.parseFloat(numeratorText);
+      const denominator = Number.parseFloat(denominatorText);
+      if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator === 0) {
+        return Number.NaN;
+      }
+      total += numerator / denominator;
+    } else {
+      const number = Number.parseFloat(part);
+      if (!Number.isFinite(number)) return Number.NaN;
+      total += number;
+    }
+  }
+
+  return total;
+}
+
+function formatFraction(value, denominator) {
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  let whole = Math.floor(absolute);
+  let numerator = Math.round((absolute - whole) * denominator);
+
+  if (numerator === denominator) {
+    whole += 1;
+    numerator = 0;
+  }
+
+  if (numerator === 0) return `${sign}${whole}`;
+
+  const divisor = gcd(numerator, denominator);
+  const reducedNumerator = numerator / divisor;
+  const reducedDenominator = denominator / divisor;
+  return whole > 0
+    ? `${sign}${whole} ${reducedNumerator}/${reducedDenominator}`
+    : `${sign}${reducedNumerator}/${reducedDenominator}`;
+}
+
 function format(value) {
+  const outputFormat = document.querySelector("#outputFormat")?.value ?? "decimal";
+  const denominator = Number.parseInt(document.querySelector("#fractionDenominator")?.value ?? "16", 10);
+  if (outputFormat === "fraction") {
+    return `${formatFraction(value, denominator)} in`;
+  }
   return `${round(value).toFixed(3)} in`;
 }
 
 function readNumber(id) {
   const element = document.querySelector(`#${id}`);
-  const value = Number.parseFloat(element.value);
+  const value = parseMeasurement(element.value);
   if (!Number.isFinite(value)) {
     throw new Error(`Valor inválido: ${element.previousElementSibling.textContent}`);
   }
@@ -400,7 +463,16 @@ form.addEventListener("submit", (event) => {
 });
 
 fields.forEach((id) => {
-  document.querySelector(`#${id}`).addEventListener("change", saveValues);
+  document.querySelector(`#${id}`).addEventListener("change", () => {
+    saveValues();
+    if (id === "outputFormat" || id === "fractionDenominator") {
+      try {
+        calculateAndRender();
+      } catch {
+        // Ignore format refresh errors until the next explicit calculation.
+      }
+    }
+  });
 });
 
 copyButton.addEventListener("click", async () => {

@@ -29,19 +29,19 @@
           </label>
           <label>
             <span>Ancho del panel (in)</span>
-            <input id="panelWidth" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="panelWidth" inputmode="text" type="text" required />
           </label>
           <label>
             <span>Espacio entre paneles / clamp (in)</span>
-            <input id="clampGap" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="clampGap" inputmode="text" type="text" required />
           </label>
           <label>
             <span>Exceso de riel por extremo (in)</span>
-            <input id="railExcess" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="railExcess" inputmode="text" type="text" required />
           </label>
           <label>
             <span>Largo inicial del riel (in)</span>
-            <input id="stockRailLength" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="stockRailLength" inputmode="text" type="text" required />
           </label>
           <label>
             <span>Rieles por fila</span>
@@ -49,15 +49,31 @@
           </label>
           <label>
             <span>Pata inicial/final desde borde (in)</span>
-            <input id="edgeLegOffset" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="edgeLegOffset" inputmode="text" type="text" required />
           </label>
           <label>
             <span>Distancia mínima splice-pata (in)</span>
-            <input id="minSpliceLegDistance" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="minSpliceLegDistance" inputmode="text" type="text" required />
           </label>
           <label>
             <span>Span máximo entre patas (in)</span>
-            <input id="maxLegSpan" inputmode="decimal" min="0" step="0.001" type="number" required />
+            <input id="maxLegSpan" inputmode="text" type="text" required />
+          </label>
+          <label>
+            <span>Formato de salida</span>
+            <select id="outputFormat">
+              <option value="decimal">Decimal</option>
+              <option value="fraction">Fracción</option>
+            </select>
+          </label>
+          <label>
+            <span>Precisión fracción</span>
+            <select id="fractionDenominator">
+              <option value="8">1/8</option>
+              <option value="16">1/16</option>
+              <option value="32">1/32</option>
+              <option value="64">1/64</option>
+            </select>
           </label>
           <div class="button-row">
             <button type="submit" class="primary-button">Calcular</button>
@@ -81,6 +97,7 @@
       <div class="empty-state">
         <strong>Ejemplo de uso</strong>
         <p>Largo de riel = paneles + clamps + exceso de riel en ambos extremos.</p>
+        <p>Puedes escribir medidas como <strong>44.65</strong>, <strong>44 5/8</strong>, <strong>1/2</strong> o <strong>12-1/4</strong>.</p>
         <p>Las patas convergen desde los bordes hacia el splice o centro para evitar spans finales demasiado cortos.</p>
       </div>
     </template>
