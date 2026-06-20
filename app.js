@@ -201,6 +201,34 @@ function calculatePlan(values) {
     if (position < rowLength) splicePositions.push(round(position));
   }
 
+  const panelStartPosition = values.railExcess;
+  const panelEndPosition = values.railExcess + panelSpan;
+  const panelEdges = [];
+  for (let index = 0; index < values.panelCount; index += 1) {
+    const start = panelStartPosition + index * (values.panelWidth + values.clampGap);
+    panelEdges.push({ start: round(start), end: round(start + values.panelWidth) });
+  }
+
+  const endClamps = [
+    { label: "End-clamp izq.", position: round(panelStartPosition) },
+    { label: "End-clamp der.", position: round(panelEndPosition) },
+  ];
+
+  const midClamps = [];
+  for (let index = 0; index < panelEdges.length - 1; index += 1) {
+    const gapStart = panelEdges[index].end;
+    const gapEnd = panelEdges[index + 1].start;
+    midClamps.push({
+      label: `Mid-clamp ${index + 1}`,
+      position: round((gapStart + gapEnd) / 2),
+    });
+  }
+
+  const endGaps = {
+    left: round(panelStartPosition),
+    right: round(rowLength - panelEndPosition),
+  };
+
   const legs = calculateLegPositions(
     rowLength,
     values.edgeLegOffset,
@@ -221,6 +249,10 @@ function calculatePlan(values) {
     legPositions: legs.positions,
     legSpans: legs.spans,
     warnings: legs.warnings,
+    panelEdges,
+    endClamps,
+    midClamps,
+    endGaps,
   };
 }
 
@@ -324,6 +356,38 @@ function buildRailSvg(plan) {
     })
     .join("");
 
+  const panelRects = plan.panelEdges
+    .map((edge, index) => {
+      const px = x(edge.start);
+      const widthPx = x(edge.end) - x(edge.start);
+      return `
+        <g class="panel-mark">
+          <rect x="${px}" y="90" width="${widthPx}" height="52" rx="6" class="panel-block" />
+          <text x="${px + widthPx / 2}" y="120" class="panel-number">${index + 1}</text>
+        </g>`;
+    })
+    .join("");
+
+  const clampMarks = [...plan.endClamps, ...plan.midClamps]
+    .map((clamp) => {
+      const px = x(clamp.position);
+      const isEnd = clamp.label.includes("End");
+      return `
+        <g class="clamp-mark ${isEnd ? "clamp-end" : "clamp-mid"}">
+          <rect x="${px - 4}" y="84" width="8" height="64" rx="3" />
+          <text x="${px}" y="60" class="small-label">${round(clamp.position).toFixed(1)}</text>
+        </g>`;
+    })
+    .join("");
+
+  const endGapLabels = `
+    <g class="gap-mark">
+      <line x1="${x(0)}" y1="146" x2="${x(plan.endGaps.left)}" y2="146" />
+      <text x="${x(plan.endGaps.left / 2)}" y="160" class="small-label">gap ${round(plan.endGaps.left).toFixed(2)}</text>
+      <line x1="${x(plan.rowLength - plan.endGaps.right)}" y1="146" x2="${x(plan.rowLength)}" y2="146" />
+      <text x="${x(plan.rowLength - plan.endGaps.right / 2)}" y="160" class="small-label">gap ${round(plan.endGaps.right).toFixed(2)}</text>
+    </g>`;
+
   return `
     <div class="rail-visual-wrap">
       <svg class="rail-visual" viewBox="0 0 ${width} 250" role="img" aria-label="Diagrama visual del riel con patas, spans y splices">
@@ -333,6 +397,9 @@ function buildRailSvg(plan) {
         <rect x="${panelStart}" y="88" width="${panelEnd - panelStart}" height="56" rx="10" class="panel-zone" />
         <text x="${(panelStart + panelEnd) / 2}" y="82" class="zone-label">zona de paneles + clamps: ${format(plan.panelSpan)}</text>
         ${sectionRects.join("")}
+        ${panelRects}
+        ${endGapLabels}
+        ${clampMarks}
         <text x="${leftPad}" y="154" class="small-label" text-anchor="start">0</text>
         <text x="${leftPad + railWidth}" y="154" class="small-label" text-anchor="end">${round(plan.rowLength).toFixed(1)} in</text>
         ${spanLabels}
@@ -342,6 +409,8 @@ function buildRailSvg(plan) {
       <div class="visual-legend">
         <span><i class="legend-rail"></i> Secciones de riel</span>
         <span><i class="legend-panel"></i> Paneles + clamps</span>
+        <span><i class="legend-clamp-mid"></i> Mid-clamp</span>
+        <span><i class="legend-clamp-end"></i> End-clamp</span>
         <span><i class="legend-leg"></i> Patas</span>
         <span><i class="legend-splice"></i> Splice</span>
       </div>
@@ -516,6 +585,14 @@ function renderPlan(plan) {
       <ul class="splice-list">${spliceHtml}</ul>
     </div>
     <div class="detail-panel">
+      <h3>Clamps y gaps de extremos</h3>
+      <ul class="rail-list">
+        <li>End-clamp izquierdo en ${format(plan.endClamps[0].position)} (gap extremo: ${format(plan.endGaps.left)})</li>
+        ${plan.midClamps.map((clamp) => `<li>${clamp.label} en ${format(clamp.position)}</li>`).join("")}
+        <li>End-clamp derecho en ${format(plan.endClamps[1].position)} (gap extremo: ${format(plan.endGaps.right)})</li>
+      </ul>
+    </div>
+    <div class="detail-panel">
       <h3>Notas</h3>
       <ul class="notes">
         <li>El exceso de riel para paneles es independiente de la posición de patas extremas.</li>
@@ -567,6 +644,13 @@ function buildPlainText(plan) {
       lines.push(right === null ? "  derecha: sin pata" : `  derecha: ${format(right - splice)} hasta ${format(right)}`);
     });
   }
+
+  lines.push("", "Clamps y gaps de extremos:");
+  lines.push(`- End-clamp izquierdo: ${format(plan.endClamps[0].position)} (gap extremo ${format(plan.endGaps.left)})`);
+  plan.midClamps.forEach((clamp) => {
+    lines.push(`- ${clamp.label}: ${format(clamp.position)}`);
+  });
+  lines.push(`- End-clamp derecho: ${format(plan.endClamps[1].position)} (gap extremo ${format(plan.endGaps.right)})`);
 
   if (plan.warnings.length) {
     lines.push("", "Avisos:", ...plan.warnings.map((warning) => `- ${warning}`));

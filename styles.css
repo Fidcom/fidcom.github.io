@@ -323,6 +323,49 @@ button {
   background: #ef4444;
 }
 
+.panel-block {
+  fill: rgba(15, 118, 110, 0.12);
+  stroke: rgba(15, 118, 110, 0.55);
+  stroke-width: 1.5;
+}
+
+.panel-number {
+  fill: #0b5d56;
+  font-size: 13px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.clamp-end rect {
+  fill: #7c2d12;
+}
+
+.clamp-mid rect {
+  fill: #b45309;
+}
+
+.clamp-mark text {
+  fill: #7c2d12;
+}
+
+.gap-mark line {
+  stroke: #2563eb;
+  stroke-width: 3;
+}
+
+.gap-mark text {
+  fill: #1d4ed8;
+}
+
+.legend-clamp-mid {
+  background: #b45309;
+}
+
+.legend-clamp-end {
+  background: #7c2d12;
+}
+
 .rail-list,
 .splice-list,
 .notes {
