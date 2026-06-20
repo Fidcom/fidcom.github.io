@@ -289,15 +289,13 @@ function calculateCrossRowLayout(plan) {
   const railEdgeSetbackProjection = Math.max(0, (panelProjection - railRunProjection) / 2);
   const railEdgeSetback = cosTilt !== 0 ? railEdgeSetbackProjection / cosTilt : railEdgeSetbackProjection;
 
-  // Altura del borde del panel sobre el suelo:
-  //  - borde bajo (frontal) = altura de la pata corta (lo que se mide al frente)
-  //  - borde alto (trasero) = borde bajo + rise total del panel
+  // La altura ingresada corresponde al punto de apoyo de la pata corta
+  // (incluyendo riel hasta la cara inferior del panel), no al borde bajo.
   const frontLegHeight = plan.frontLegHeight > 0 ? plan.frontLegHeight : 0;
-  const lowEdgeHeight = frontLegHeight;
-  const highEdgeHeight = frontLegHeight + panelRise;
-  // Alturas de las patas (en su posición centrada) sobre el suelo.
-  const shortLegHeight = frontLegHeight + railEdgeSetbackProjection * tanTilt;
-  const tallLegHeight = frontLegHeight + (railEdgeSetbackProjection + railRunProjection) * tanTilt;
+  const shortLegHeight = frontLegHeight;
+  const tallLegHeight = frontLegHeight + railRunProjection * tanTilt;
+  const lowEdgeHeight = Math.max(0, shortLegHeight - railEdgeSetbackProjection * tanTilt);
+  const highEdgeHeight = tallLegHeight + railEdgeSetbackProjection * tanTilt;
 
   // Distancia proyectada (en el suelo) entre la pata trasera de una fila y
   // la pata delantera de la siguiente fila.
@@ -513,7 +511,7 @@ function buildCrossRowSvg(plan) {
 
   // Escala vertical separada para que rise y patas se vean sin desbordar.
   const vScale = scale * 1.05;
-  const frontLegPx = Math.max(frontLegHeight * vScale, 16); // alto pata corta en px
+  const frontLegPx = Math.max(crossRow.lowEdgeHeight * vScale, 10);
   // Y del borde BAJO del panel (sobre la pata corta) y del borde ALTO.
   const lowEdgeY = groundY - frontLegPx;
   const riseTopY = lowEdgeY - Math.max(panelRise * vScale, 24);
@@ -621,7 +619,7 @@ function buildCrossRowSvg(plan) {
         </defs>
         <rect x="18" y="14" width="964" height="452" rx="20" class="cross-row-bg" />
 
-        <text x="${leftPad}" y="42" class="cross-title" text-anchor="start">Vista de perfil · tilt ${tiltTxt} · patas centradas · pata corta ${format(frontLegHeight)}</text>
+        <text x="${leftPad}" y="42" class="cross-title" text-anchor="start">Vista de perfil · tilt ${tiltTxt} · patas centradas · apoyo pata corta ${format(frontLegHeight)}</text>
 
         <!-- Suelo -->
         <line x1="${leftPad - 24}" y1="${groundY}" x2="${width - rightPad + 8}" y2="${groundY}" class="cross-ground" />
@@ -732,14 +730,19 @@ function renderPlan(plan) {
           <em>Patas centradas; sobra ${format(crossRow.railEdgeSetback)} a cada borde del panel</em>
         </div>
         <div class="layout-item">
+          <span>Altura del apoyo en pata corta al panel</span>
+          <strong>${format(crossRow.shortLegHeight)}</strong>
+          <em>Medida ingresada: pata corta + riel hasta cara inferior del panel</em>
+        </div>
+        <div class="layout-item">
           <span>Altura del borde BAJO (frontal) al suelo</span>
           <strong>${format(crossRow.lowEdgeHeight)}</strong>
-          <em>Igual a la pata corta/frontal</em>
+          <em>Menor que el apoyo por la inclinación hasta el borde</em>
         </div>
         <div class="layout-item">
           <span>Altura del borde ALTO (trasero) al suelo</span>
           <strong>${format(crossRow.highEdgeHeight)}</strong>
-          <em>Pata corta + rise del panel (${format(crossRow.panelRise)})</em>
+          <em>Apoyo trasero + subida hasta el borde alto</em>
         </div>
         <div class="layout-item">
           <span>Gap entre bordes de paneles de filas consecutivas</span>
