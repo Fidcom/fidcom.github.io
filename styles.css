@@ -479,6 +479,45 @@ button {
   stroke-width: 2;
 }
 
+.cross-leg line {
+  stroke: #134e4a;
+  stroke-width: 2;
+  stroke-dasharray: 3 3;
+}
+
+.cross-leg circle {
+  fill: #f59e0b;
+  stroke: #7c2d12;
+  stroke-width: 2;
+}
+
+.cross-leg text {
+  fill: #134e4a;
+  font-size: 11px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: hanging;
+}
+
+.cross-dim-leg text {
+  fill: #92400e;
+  font-weight: 800;
+}
+
+.cross-dim-leg line {
+  stroke: #b45309;
+}
+
+.cross-dim-rows line {
+  stroke: #0f766e;
+}
+
+.cross-dim-rows .cross-ext {
+  stroke: #94a3b8;
+  stroke-width: 1.2;
+  stroke-dasharray: 4 4;
+}
+
 .cross-dim line {
   stroke: #0f766e;
   stroke-width: 1.6;
