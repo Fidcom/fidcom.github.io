@@ -514,6 +514,21 @@ button {
   font-weight: 800;
 }
 
+.cross-dim-edge line {
+  stroke: #7c3aed;
+}
+
+.cross-dim-edge .cross-ext {
+  stroke: #cbd5e1;
+  stroke-width: 1.2;
+  stroke-dasharray: 4 4;
+}
+
+.cross-dim-edge text {
+  fill: #6d28d9;
+  font-weight: 800;
+}
+
 .cross-leg text {
   fill: #134e4a;
   font-size: 11px;

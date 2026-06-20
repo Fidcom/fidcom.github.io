@@ -274,11 +274,33 @@ function calculateCrossRowLayout(plan) {
   const tiltRadians = (plan.tiltDeg * Math.PI) / 180;
   const cosTilt = Math.cos(tiltRadians);
   const sinTilt = Math.sin(tiltRadians);
+  const tanTilt = cosTilt !== 0 ? sinTilt / cosTilt : 0;
   const panelProjection = plan.panelLength * cosTilt;
   const panelRise = plan.panelLength * sinTilt;
-  const railEdgeSetback = Math.max(0, (plan.panelLength - plan.parallelRailSpacing) / 2);
-  const railEdgeSetbackProjection = railEdgeSetback * cosTilt;
-  const sameRowRailProjection = plan.parallelRailSpacing * cosTilt;
+
+  // `parallelRailSpacing` se interpreta como la distancia PROYECTADA en el
+  // suelo entre las dos patas (lo que se mide con cinta sobre el piso).
+  const railRunProjection = plan.parallelRailSpacing;           // separación en el suelo
+  const railRunReal = cosTilt !== 0 ? railRunProjection / cosTilt : railRunProjection; // sobre el plano
+  // sameRowRailProjection se mantiene como alias (= proyección en el suelo).
+  const sameRowRailProjection = railRunProjection;
+
+  // Patas CENTRADAS en el panel: retranqueo proyectado igual en cada borde.
+  const railEdgeSetbackProjection = Math.max(0, (panelProjection - railRunProjection) / 2);
+  const railEdgeSetback = cosTilt !== 0 ? railEdgeSetbackProjection / cosTilt : railEdgeSetbackProjection;
+
+  // Altura del borde del panel sobre el suelo:
+  //  - borde bajo (frontal) = altura de la pata corta (lo que se mide al frente)
+  //  - borde alto (trasero) = borde bajo + rise total del panel
+  const frontLegHeight = plan.frontLegHeight > 0 ? plan.frontLegHeight : 0;
+  const lowEdgeHeight = frontLegHeight;
+  const highEdgeHeight = frontLegHeight + panelRise;
+  // Alturas de las patas (en su posición centrada) sobre el suelo.
+  const shortLegHeight = frontLegHeight + railEdgeSetbackProjection * tanTilt;
+  const tallLegHeight = frontLegHeight + (railEdgeSetbackProjection + railRunProjection) * tanTilt;
+
+  // Distancia proyectada (en el suelo) entre la pata trasera de una fila y
+  // la pata delantera de la siguiente fila.
   const betweenRowsAdjacentRailFeet = plan.rowGap + 2 * railEdgeSetbackProjection;
   const rowPitchEdgeToEdge = panelProjection + plan.rowGap;
 
@@ -288,6 +310,12 @@ function calculateCrossRowLayout(plan) {
     railEdgeSetback,
     railEdgeSetbackProjection,
     sameRowRailProjection,
+    railRunProjection,
+    railRunReal,
+    lowEdgeHeight,
+    highEdgeHeight,
+    shortLegHeight,
+    tallLegHeight,
     betweenRowsAdjacentRailFeet,
     rowPitchEdgeToEdge,
   };
@@ -462,12 +490,12 @@ function buildRailSvg(plan) {
 function buildCrossRowSvg(plan) {
   const crossRow = calculateCrossRowLayout(plan);
   const width = 1000;
-  const height = 450;
+  const height = 480;
 
   // Vista de PERFIL (elevación lateral): el suelo es horizontal y los
   // paneles se ven como líneas inclinadas a `tiltDeg`. Eje X = distancia
   // horizontal proyectada; eje Y = altura.
-  const groundY = 320;
+  const groundY = 300;
   const leftPad = 118;
   const rightPad = 60;
   const usableW = width - leftPad - rightPad;
@@ -499,13 +527,12 @@ function buildCrossRowSvg(plan) {
 
   const tiltTxt = `${round(plan.tiltDeg).toFixed(1)}°`;
 
-  // Posición proyectada (desde el borde bajo del panel) de cada pata/riel:
-  //  - pata baja (corta): a `railEdgeSetbackProjection` del borde bajo
-  //  - pata alta (larga): a `railEdgeSetbackProjection + sameRowRailProjection`
-  const setbackProj = crossRow.railEdgeSetbackProjection; // retranqueo proyectado
-  const railSpanProj = crossRow.sameRowRailProjection;    // separación proyectada entre patas
+  // Patas CENTRADAS en el panel. `railRunProj` es la separación proyectada
+  // (la que se mide en el suelo). El retranqueo es igual en ambos bordes.
+  const setbackProj = crossRow.railEdgeSetbackProjection; // retranqueo proyectado (centrado)
+  const railRunProj = crossRow.railRunProjection;         // separación proyectada (suelo)
   const lowLegFrac = panelProj > 0 ? setbackProj / panelProj : 0;
-  const highLegFrac = panelProj > 0 ? (setbackProj + railSpanProj) / panelProj : 1;
+  const highLegFrac = panelProj > 0 ? (setbackProj + railRunProj) / panelProj : 1;
 
   // Devuelve el punto {x,y} sobre la línea inclinada del panel (que va de
   // lowEdgeY en el borde bajo a riseTopY en el borde alto).
@@ -549,14 +576,16 @@ function buildCrossRowSvg(plan) {
       </g>`;
   };
 
-  // Cota inclinada entre dos patas de la misma fila (a lo largo del panel).
-  const dimLegSpan = (pa, pb, value) => {
-    const mx = (pa.x + pb.x) / 2;
-    const my = (pa.y + pb.y) / 2;
+  // Cota PROYECTADA en el suelo entre las dos patas de la misma fila (48").
+  // Líneas de extensión bajan de cada pata al nivel de cota.
+  const dimLegRun = (pa, pb, value, dimY) => {
+    const mid = (pa.x + pb.x) / 2;
     return `
       <g class="cross-dim cross-dim-leg">
-        <line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
-        <text x="${mx}" y="${my - 10}">${value}</text>
+        <line x1="${pa.x}" y1="${dimY}" x2="${pb.x}" y2="${dimY}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
+        <line x1="${pa.x}" y1="${pa.y}" x2="${pa.x}" y2="${dimY}" class="cross-ext" />
+        <line x1="${pb.x}" y1="${pb.y}" x2="${pb.x}" y2="${dimY}" class="cross-ext" />
+        <text x="${mid}" y="${dimY - 6}">patas (suelo): ${value}</text>
       </g>`;
   };
 
@@ -564,29 +593,20 @@ function buildCrossRowSvg(plan) {
   const tri1 = triangle(r1x0, r1x1, "cross-tri-a", 1);
   const tri2 = triangle(r2x0, r2x1, "cross-tri-b", 2);
 
-  // Cota del rise (vertical: del borde bajo al borde alto del panel fila 1).
-  // Se ubica entre el borde alto de fila 1 y el inicio del gap (zona libre),
-  // con el texto rotado para que quepa en el espacio angosto.
-  const riseDimX = r1x1 + 12;
-  const riseMidY = (lowEdgeY + riseTopY) / 2;
-  const riseDim = `
-    <g class="cross-dim cross-dim-v">
-      <line x1="${riseDimX}" y1="${lowEdgeY}" x2="${riseDimX}" y2="${riseTopY}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
-      <line x1="${tri1.high.x}" y1="${riseTopY}" x2="${riseDimX}" y2="${riseTopY}" class="cross-ext" />
-      <line x1="${tri1.high.x}" y1="${lowEdgeY}" x2="${riseDimX}" y2="${lowEdgeY}" class="cross-ext" />
-      <text x="${riseDimX + 12}" y="${riseMidY}" text-anchor="middle" transform="rotate(-90 ${riseDimX + 12} ${riseMidY})">rise ${format(panelRise)}</text>
-    </g>`;
-
-  // Cota de la altura de la pata corta/frontal (vertical, a la izquierda).
-  const frontLegDimX = r1x0 - 16;
-  const frontLegTextY = (groundY + lowEdgeY) / 2;
-  const frontLegDim = frontLegHeight > 0 ? `
-    <g class="cross-dim cross-dim-leg-h">
-      <line x1="${frontLegDimX}" y1="${groundY}" x2="${frontLegDimX}" y2="${lowEdgeY}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
-      <line x1="${frontLegDimX}" y1="${groundY}" x2="${r1x0}" y2="${groundY}" class="cross-ext" />
-      <line x1="${frontLegDimX}" y1="${lowEdgeY}" x2="${r1x0}" y2="${lowEdgeY}" class="cross-ext" />
-      <text x="${frontLegDimX - 8}" y="${frontLegTextY}" text-anchor="middle" transform="rotate(-90 ${frontLegDimX - 8} ${frontLegTextY})">pata corta ${format(frontLegHeight)}</text>
-    </g>` : "";
+  // Cota vertical de la altura de un borde del panel al suelo.
+  const dimEdgeHeight = (x, edgeY, value, label, side) => {
+    const dimX = side === "left" ? x - 16 : x + 16;
+    const anchor = side === "left" ? "end" : "start";
+    const tx = side === "left" ? dimX - 8 : dimX + 8;
+    const ty = (groundY + edgeY) / 2;
+    return `
+      <g class="cross-dim cross-dim-edge">
+        <line x1="${dimX}" y1="${groundY}" x2="${dimX}" y2="${edgeY}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
+        <line x1="${dimX}" y1="${groundY}" x2="${x}" y2="${groundY}" class="cross-ext" />
+        <line x1="${dimX}" y1="${edgeY}" x2="${x}" y2="${edgeY}" class="cross-ext" />
+        <text x="${tx}" y="${ty}" text-anchor="middle" transform="rotate(-90 ${tx} ${ty})">${label} ${value}</text>
+      </g>`;
+  };
 
   return `
     <div class="cross-row-wrap">
@@ -599,9 +619,9 @@ function buildCrossRowSvg(plan) {
             <path d="M 1 1 L 9 5 L 1 9" fill="none" stroke="#0f766e" stroke-width="1.6" />
           </marker>
         </defs>
-        <rect x="18" y="18" width="964" height="414" rx="20" class="cross-row-bg" />
+        <rect x="18" y="14" width="964" height="452" rx="20" class="cross-row-bg" />
 
-        <text x="${leftPad}" y="48" class="cross-title" text-anchor="start">Vista de perfil · tilt ${tiltTxt} · patas reales (pata corta ${format(frontLegHeight)})</text>
+        <text x="${leftPad}" y="42" class="cross-title" text-anchor="start">Vista de perfil · tilt ${tiltTxt} · patas centradas · pata corta ${format(frontLegHeight)}</text>
 
         <!-- Suelo -->
         <line x1="${leftPad - 24}" y1="${groundY}" x2="${width - rightPad + 8}" y2="${groundY}" class="cross-ground" />
@@ -612,19 +632,18 @@ function buildCrossRowSvg(plan) {
         <text x="${(r1x0 + r1x1) / 2}" y="${riseTopY - 14}" class="cross-label">Fila 1</text>
         <text x="${(r2x0 + r2x1) / 2}" y="${riseTopY - 14}" class="cross-label">Fila 2</text>
 
-        ${frontLegDim}
-        ${riseDim}
-
-        <!-- Distancia entre patas de la MISMA fila (a lo largo del panel) -->
-        ${dimLegSpan(tri1.low, tri1.high, format(plan.parallelRailSpacing))}
-        ${dimLegSpan(tri2.low, tri2.high, format(plan.parallelRailSpacing))}
+        <!-- Altura de los bordes del panel al suelo:
+             borde bajo en el extremo izquierdo de Fila 1, borde alto en el
+             extremo derecho de Fila 2 (esquinas libres, sin solapes). -->
+        ${dimEdgeHeight(r1x0, lowEdgeY, format(crossRow.lowEdgeHeight), "borde bajo", "left")}
+        ${dimEdgeHeight(r2x1, riseTopY, format(crossRow.highEdgeHeight), "borde alto", "right")}
 
         <!-- Distancia entre patas de FILAS consecutivas (pata alta F1 -> pata baja F2) -->
         <g class="cross-dim cross-dim-rows">
-          <line x1="${tri1.high.x}" y1="${groundY - 118}" x2="${tri2.low.x}" y2="${groundY - 118}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
-          <line x1="${tri1.high.x}" y1="${tri1.high.y}" x2="${tri1.high.x}" y2="${groundY - 118}" class="cross-ext" />
-          <line x1="${tri2.low.x}" y1="${tri2.low.y}" x2="${tri2.low.x}" y2="${groundY - 118}" class="cross-ext" />
-          <text x="${(tri1.high.x + tri2.low.x) / 2}" y="${groundY - 126}">patas entre filas: ${format(crossRow.betweenRowsAdjacentRailFeet)}</text>
+          <line x1="${tri1.high.x}" y1="${groundY - 132}" x2="${tri2.low.x}" y2="${groundY - 132}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
+          <line x1="${tri1.high.x}" y1="${tri1.high.y}" x2="${tri1.high.x}" y2="${groundY - 132}" class="cross-ext" />
+          <line x1="${tri2.low.x}" y1="${tri2.low.y}" x2="${tri2.low.x}" y2="${groundY - 132}" class="cross-ext" />
+          <text x="${(tri1.high.x + tri2.low.x) / 2}" y="${groundY - 140}">patas entre filas (suelo): ${format(crossRow.betweenRowsAdjacentRailFeet)}</text>
         </g>
 
         <!-- Gap proyectado entre bordes de filas (sobre el suelo) -->
@@ -633,12 +652,16 @@ function buildCrossRowSvg(plan) {
           <text x="${(r1x1 + r2x0) / 2}" y="${groundY - 20}" class="cross-gap-label">gap ${format(rowGap)}</text>
         </g>
 
-        <!-- Cotas horizontales de proyección -->
-        ${dimH(r1x0, r1x1, format(panelProj), groundY + 44, "proy. panel")}
-        ${dimH(r2x0, r2x1, format(panelProj), groundY + 44, "proy. panel")}
+        <!-- Distancia PROYECTADA en el suelo entre las patas de cada fila -->
+        ${dimLegRun(tri1.low, tri1.high, format(crossRow.railRunProjection), groundY + 40)}
+        ${dimLegRun(tri2.low, tri2.high, format(crossRow.railRunProjection), groundY + 40)}
+
+        <!-- Cotas de proyección del panel -->
+        ${dimH(r1x0, r1x1, format(panelProj), groundY + 78, "proy. panel")}
+        ${dimH(r2x0, r2x1, format(panelProj), groundY + 78, "proy. panel")}
 
         <!-- Cota total (proy. fila 1 + gap + proy. fila 2) -->
-        ${dimH(r1x0, r2x1, format(totalReal), groundY + 84, "ancho total")}
+        ${dimH(r1x0, r2x1, format(totalReal), groundY + 116, "ancho total")}
       </svg>
       <div class="visual-legend cross-legend">
         <span><i class="legend-row"></i> Paneles (perfil)</span>
@@ -699,9 +722,24 @@ function renderPlan(plan) {
       ${buildCrossRowSvg(plan)}
       <div class="layout-grid">
         <div class="layout-item">
-          <span>Distancia entre rieles paralelos de la misma fila</span>
-          <strong>${format(plan.parallelRailSpacing)}</strong>
+          <span>Distancia entre patas en el suelo (proyectada)</span>
+          <strong>${format(crossRow.railRunProjection)}</strong>
           <em class="status-${railSpacingStatus.className}">${railSpacingStatus.text}</em>
+        </div>
+        <div class="layout-item">
+          <span>Largo real del riel entre patas (sobre el plano)</span>
+          <strong>${format(crossRow.railRunReal)}</strong>
+          <em>Patas centradas; sobra ${format(crossRow.railEdgeSetback)} a cada borde del panel</em>
+        </div>
+        <div class="layout-item">
+          <span>Altura del borde BAJO (frontal) al suelo</span>
+          <strong>${format(crossRow.lowEdgeHeight)}</strong>
+          <em>Igual a la pata corta/frontal</em>
+        </div>
+        <div class="layout-item">
+          <span>Altura del borde ALTO (trasero) al suelo</span>
+          <strong>${format(crossRow.highEdgeHeight)}</strong>
+          <em>Pata corta + rise del panel (${format(crossRow.panelRise)})</em>
         </div>
         <div class="layout-item">
           <span>Gap entre bordes de paneles de filas consecutivas</span>
@@ -709,19 +747,9 @@ function renderPlan(plan) {
           <em class="status-${rowGapStatus.className}">${rowGapStatus.text}</em>
         </div>
         <div class="layout-item">
-          <span>Panel proyectado horizontalmente por tilt ${round(plan.tiltDeg).toFixed(2)}°</span>
-          <strong>${format(crossRow.panelProjection)}</strong>
-          <em>Altura aproximada del borde alto: ${format(crossRow.panelRise)}</em>
-        </div>
-        <div class="layout-item">
-          <span>Distancia proyectada entre rieles/patas de la misma fila</span>
-          <strong>${format(crossRow.sameRowRailProjection)}</strong>
-          <em>Basado en ${format(plan.parallelRailSpacing)} sobre el plano inclinado</em>
-        </div>
-        <div class="layout-item">
-          <span>Distancia entre patas/rieles adyacentes de filas consecutivas</span>
+          <span>Distancia entre patas de filas consecutivas (suelo)</span>
           <strong>${format(crossRow.betweenRowsAdjacentRailFeet)}</strong>
-          <em>Gap + setback proyectado de riel a borde de panel en ambas filas</em>
+          <em>Gap + sobrante proyectado de pata a borde en ambas filas</em>
         </div>
         <div class="layout-item">
           <span>Pitch de fila borde-a-borde proyectado</span>
