@@ -293,16 +293,32 @@ function calculateCrossRowLayout(plan) {
 
 function buildRailSvg(plan) {
   const width = 1000;
-  const leftPad = 44;
-  const railWidth = 912;
+  const leftPad = 56;
+  const railWidth = 888;
   const x = (position) => leftPad + (position / plan.rowLength) * railWidth;
-  const railY = 104;
-  const railHeight = 24;
+
+  // Vertical bands (top -> bottom):
+  //  - clamp distance labels (top)
+  //  - clamp position numbers + ticks
+  //  - rail + panel blocks
+  //  - leg stems + circles + labels
+  //  - leg span labels (bottom, between legs)
+  const clampDistY = 54;     // distancia entre clamps (arriba)
+  const clampPosY = 78;      // posición de cada clamp
+  const clampTickTop = 88;
+  const railY = 150;
+  const railHeight = 28;
+  const clampTickBottom = railY + railHeight + 6;
+  const legCircleY = 244;
+  const legLabelY = 264;
+  const legPosY = 280;
+  const legSpanY = 314;      // distancia entre patas (abajo, entre patas)
+
   const panelStart = x(plan.railExcess);
   const panelEnd = x(plan.rowLength - plan.railExcess);
+
   const sectionRects = [];
   let sectionStart = 0;
-
   plan.cutLengths.forEach((cut, index) => {
     const sectionEnd = sectionStart + cut;
     sectionRects.push(
@@ -311,30 +327,81 @@ function buildRailSvg(plan) {
     sectionStart = sectionEnd;
   });
 
-  const legMarks = plan.legPositions
-    .map((position, index) => {
-      const px = x(position);
-      const labelY = index % 2 === 0 ? 176 : 205;
+  const panelRects = plan.panelEdges
+    .map((edge, index) => {
+      const px = x(edge.start);
+      const widthPx = x(edge.end) - x(edge.start);
       return `
-        <g class="leg-mark">
-          <line x1="${px}" y1="${railY + railHeight}" x2="${px}" y2="168" />
-          <circle cx="${px}" cy="168" r="7" />
-          <text x="${px}" y="${labelY}">P${index + 1}</text>
-          <text x="${px}" y="${labelY + 14}" class="small-label">${round(position).toFixed(1)}</text>
+        <g class="panel-mark">
+          <rect x="${px}" y="${railY - 4}" width="${widthPx}" height="${railHeight + 8}" rx="5" class="panel-block" />
+          <text x="${px + widthPx / 2}" y="${railY + railHeight / 2}" class="panel-number">${index + 1}</text>
         </g>`;
     })
     .join("");
 
-  const spanLabels = plan.legPositions
+  // Clamps sorted left-to-right so distance labels read in order.
+  const clamps = [...plan.endClamps, ...plan.midClamps].sort((a, b) => a.position - b.position);
+  const clampMarks = clamps
+    .map((clamp) => {
+      const px = x(clamp.position);
+      const isEnd = clamp.label.includes("End");
+      return `
+        <g class="clamp-mark ${isEnd ? "clamp-end" : "clamp-mid"}">
+          <rect x="${px - 4}" y="${clampTickTop}" width="8" height="${clampTickBottom - clampTickTop}" rx="3" />
+          <text x="${px}" y="${clampPosY}" class="small-label">${round(clamp.position).toFixed(1)}</text>
+        </g>`;
+    })
+    .join("");
+
+  // Distancia entre clamps (arriba), centrada entre clamps consecutivos.
+  const clampDistLabels = clamps
+    .slice(0, -1)
+    .map((clamp, index) => {
+      const next = clamps[index + 1];
+      const a = x(clamp.position);
+      const b = x(next.position);
+      const mid = (a + b) / 2;
+      return `
+        <g class="clamp-dist-mark">
+          <line x1="${a + 4}" y1="${clampDistY + 6}" x2="${b - 4}" y2="${clampDistY + 6}" />
+          <text x="${mid}" y="${clampDistY}">${round(next.position - clamp.position).toFixed(1)}</text>
+        </g>`;
+    })
+    .join("");
+
+  const endGapLabels = `
+    <g class="gap-mark">
+      <line x1="${x(0)}" y1="${clampDistY + 6}" x2="${x(plan.endGaps.left)}" y2="${clampDistY + 6}" />
+      <text x="${x(plan.endGaps.left / 2)}" y="${clampDistY}">gap ${round(plan.endGaps.left).toFixed(2)}</text>
+      <line x1="${x(plan.rowLength - plan.endGaps.right)}" y1="${clampDistY + 6}" x2="${x(plan.rowLength)}" y2="${clampDistY + 6}" />
+      <text x="${x(plan.rowLength - plan.endGaps.right / 2)}" y="${clampDistY}">gap ${round(plan.endGaps.right).toFixed(2)}</text>
+    </g>`;
+
+  const legMarks = plan.legPositions
+    .map((position, index) => {
+      const px = x(position);
+      return `
+        <g class="leg-mark">
+          <line x1="${px}" y1="${railY + railHeight}" x2="${px}" y2="${legCircleY}" />
+          <circle cx="${px}" cy="${legCircleY}" r="7" />
+          <text x="${px}" y="${legLabelY}">P${index + 1}</text>
+          <text x="${px}" y="${legPosY}" class="small-label">${round(position).toFixed(1)}</text>
+        </g>`;
+    })
+    .join("");
+
+  // Distancia entre patas (abajo), centrada entre patas consecutivas.
+  const legSpanLabels = plan.legPositions
     .slice(0, -1)
     .map((position, index) => {
       const next = plan.legPositions[index + 1];
-      const mid = (x(position) + x(next)) / 2;
-      const y = index % 2 === 0 ? 80 : 64;
+      const a = x(position);
+      const b = x(next);
+      const mid = (a + b) / 2;
       return `
         <g class="span-mark">
-          <line x1="${x(position)}" y1="${y + 6}" x2="${x(next)}" y2="${y + 6}" />
-          <text x="${mid}" y="${y}">${round(next - position).toFixed(1)} in</text>
+          <line x1="${a + 4}" y1="${legSpanY - 6}" x2="${b - 4}" y2="${legSpanY - 6}" />
+          <text x="${mid}" y="${legSpanY + 8}">${round(next - position).toFixed(1)}</text>
         </g>`;
     })
     .join("");
@@ -347,68 +414,41 @@ function buildRailSvg(plan) {
       const rightText = right === null ? "--" : round(right - position).toFixed(1);
       return `
         <g class="splice-mark">
-          <line x1="${px}" y1="44" x2="${px}" y2="150" />
-          <path d="M ${px} ${railY - 12} l 10 10 l -10 10 l -10 -10 z" />
-          <text x="${px}" y="34">S${index + 1}</text>
-          <text x="${px}" y="50" class="small-label">${round(position).toFixed(1)}</text>
-          <text x="${px}" y="232" class="small-label">← ${leftText} | ${rightText} →</text>
+          <line x1="${px}" y1="${railY - 18}" x2="${px}" y2="${legCircleY}" />
+          <path d="M ${px} ${railY - 18} l 9 9 l -9 9 l -9 -9 z" />
+          <text x="${px}" y="${railY - 26}">S${index + 1} · ${round(position).toFixed(1)}</text>
+          <text x="${px}" y="${legPosY + 16}" class="small-label">← ${leftText} | ${rightText} →</text>
         </g>`;
     })
     .join("");
-
-  const panelRects = plan.panelEdges
-    .map((edge, index) => {
-      const px = x(edge.start);
-      const widthPx = x(edge.end) - x(edge.start);
-      return `
-        <g class="panel-mark">
-          <rect x="${px}" y="90" width="${widthPx}" height="52" rx="6" class="panel-block" />
-          <text x="${px + widthPx / 2}" y="120" class="panel-number">${index + 1}</text>
-        </g>`;
-    })
-    .join("");
-
-  const clampMarks = [...plan.endClamps, ...plan.midClamps]
-    .map((clamp) => {
-      const px = x(clamp.position);
-      const isEnd = clamp.label.includes("End");
-      return `
-        <g class="clamp-mark ${isEnd ? "clamp-end" : "clamp-mid"}">
-          <rect x="${px - 4}" y="84" width="8" height="64" rx="3" />
-          <text x="${px}" y="60" class="small-label">${round(clamp.position).toFixed(1)}</text>
-        </g>`;
-    })
-    .join("");
-
-  const endGapLabels = `
-    <g class="gap-mark">
-      <line x1="${x(0)}" y1="146" x2="${x(plan.endGaps.left)}" y2="146" />
-      <text x="${x(plan.endGaps.left / 2)}" y="160" class="small-label">gap ${round(plan.endGaps.left).toFixed(2)}</text>
-      <line x1="${x(plan.rowLength - plan.endGaps.right)}" y1="146" x2="${x(plan.rowLength)}" y2="146" />
-      <text x="${x(plan.rowLength - plan.endGaps.right / 2)}" y="160" class="small-label">gap ${round(plan.endGaps.right).toFixed(2)}</text>
-    </g>`;
 
   return `
     <div class="rail-visual-wrap">
-      <svg class="rail-visual" viewBox="0 0 ${width} 250" role="img" aria-label="Diagrama visual del riel con patas, spans y splices">
-        <rect x="${leftPad}" y="18" width="${railWidth}" height="214" rx="18" class="visual-bg" />
-        <line x1="${leftPad}" y1="22" x2="${leftPad}" y2="228" class="edge-line" />
-        <line x1="${leftPad + railWidth}" y1="22" x2="${leftPad + railWidth}" y2="228" class="edge-line" />
-        <rect x="${panelStart}" y="88" width="${panelEnd - panelStart}" height="56" rx="10" class="panel-zone" />
-        <text x="${(panelStart + panelEnd) / 2}" y="82" class="zone-label">zona de paneles + clamps: ${format(plan.panelSpan)}</text>
+      <svg class="rail-visual" viewBox="0 0 ${width} 340" role="img" aria-label="Diagrama visual del riel con clamps, patas, spans y splices">
+        <rect x="${leftPad - 12}" y="34" width="${railWidth + 24}" height="296" rx="18" class="visual-bg" />
+        <line x1="${leftPad}" y1="${clampTickTop - 4}" x2="${leftPad}" y2="${clampTickBottom + 4}" class="edge-line" />
+        <line x1="${leftPad + railWidth}" y1="${clampTickTop - 4}" x2="${leftPad + railWidth}" y2="${clampTickBottom + 4}" class="edge-line" />
+
+        <text x="${leftPad}" y="${clampDistY - 18}" class="band-title" text-anchor="start">Distancia entre clamps</text>
+        ${clampDistLabels}
+        ${endGapLabels}
+
         ${sectionRects.join("")}
         ${panelRects}
-        ${endGapLabels}
         ${clampMarks}
-        <text x="${leftPad}" y="154" class="small-label" text-anchor="start">0</text>
-        <text x="${leftPad + railWidth}" y="154" class="small-label" text-anchor="end">${round(plan.rowLength).toFixed(1)} in</text>
-        ${spanLabels}
-        ${spliceMarks}
+
+        <text x="${leftPad}" y="${railY - 26}" class="small-label" text-anchor="start">0</text>
+        <text x="${leftPad + railWidth}" y="${railY - 26}" class="small-label" text-anchor="end">${round(plan.rowLength).toFixed(1)} in</text>
+
         ${legMarks}
+        ${spliceMarks}
+
+        <text x="${leftPad}" y="${legSpanY + 8}" class="band-title" text-anchor="start">Distancia entre patas</text>
+        ${legSpanLabels}
       </svg>
       <div class="visual-legend">
         <span><i class="legend-rail"></i> Secciones de riel</span>
-        <span><i class="legend-panel"></i> Paneles + clamps</span>
+        <span><i class="legend-panel"></i> Paneles</span>
         <span><i class="legend-clamp-mid"></i> Mid-clamp</span>
         <span><i class="legend-clamp-end"></i> End-clamp</span>
         <span><i class="legend-leg"></i> Patas</span>
@@ -420,68 +460,106 @@ function buildRailSvg(plan) {
 function buildCrossRowSvg(plan) {
   const crossRow = calculateCrossRowLayout(plan);
   const width = 1000;
-  const height = 460;
+  const height = 450;
+
+  // Vista de PERFIL (elevación lateral): el suelo es horizontal y los
+  // paneles se ven como líneas inclinadas a `tiltDeg`. Eje X = distancia
+  // horizontal proyectada; eje Y = altura.
+  const groundY = 320;
   const leftPad = 70;
-  const railWidth = 860;
-  const x = (position) => leftPad + (position / plan.panelLength) * railWidth;
-  const panelLengthPx = railWidth;
-  const panelHeightPx = 60;
-  const panel1Y = 92;
-  const panel2Y = 292;
-  const rowGapPx = 76;
-  const tiltOffsetPx = Math.tan((plan.tiltDeg * Math.PI) / 180) * panelHeightPx * 0.55;
-  const sameRowRailOffset = ((plan.parallelRailSpacing / plan.panelLength) * railWidth) * 0.5;
-  const firstRailY = panel1Y + 16;
-  const secondRailY = panel1Y + 16 + sameRowRailOffset;
-  const firstLowerRailY = panel2Y + 16;
-  const secondLowerRailY = panel2Y + 16 + sameRowRailOffset;
-  const topPanel = [
-    `${x(0)},${panel1Y}`,
-    `${x(plan.panelLength)},${panel1Y - tiltOffsetPx}`,
-    `${x(plan.panelLength)},${panel1Y + panelHeightPx - tiltOffsetPx}`,
-    `${x(0)},${panel1Y + panelHeightPx}`,
-  ].join(" ");
-  const bottomPanel = [
-    `${x(0)},${panel2Y}`,
-    `${x(plan.panelLength)},${panel2Y - tiltOffsetPx}`,
-    `${x(plan.panelLength)},${panel2Y + panelHeightPx - tiltOffsetPx}`,
-    `${x(0)},${panel2Y + panelHeightPx}`,
-  ].join(" ");
-  const railLabelX = x(plan.panelLength / 2);
-  const rowGapLabelY = panel1Y + panelHeightPx + 34;
-  const rowGapArrowTop = panel1Y + panelHeightPx;
-  const rowGapArrowBottom = panel2Y;
+  const rightPad = 60;
+  const usableW = width - leftPad - rightPad;
+
+  // Distancias reales (in): proyección del panel, rise y gap proyectado.
+  const panelProj = crossRow.panelProjection;
+  const panelRise = crossRow.panelRise;
+  const rowGap = plan.rowGap;
+  const totalReal = panelProj + rowGap + panelProj; // dos filas + gap entre ellas
+  const scale = totalReal > 0 ? usableW / totalReal : 1;
+
+  // Escala vertical separada (un poco mayor) para que el rise sea visible.
+  const vScale = scale * 1.4;
+  const riseTopY = groundY - Math.max(panelRise * vScale, 26);
+
+  // Fila 1
+  const r1x0 = leftPad;
+  const r1x1 = leftPad + panelProj * scale;
+  // Fila 2 (después del gap)
+  const r2x0 = r1x1 + rowGap * scale;
+  const r2x1 = r2x0 + panelProj * scale;
+
+  const tiltTxt = `${round(plan.tiltDeg).toFixed(1)}°`;
+
+  // Triángulo de apoyo (suelo -> borde alto) para cada fila.
+  const triangle = (x0, x1, cls) => `
+    <polygon points="${x0},${groundY} ${x1},${groundY} ${x1},${riseTopY}" class="cross-tri ${cls}" />
+    <line x1="${x0}" y1="${groundY}" x2="${x1}" y2="${riseTopY}" class="cross-panel-line" />
+    <circle cx="${x0}" cy="${groundY}" r="4" class="cross-rail-dot" />
+    <circle cx="${x1}" cy="${riseTopY}" r="4" class="cross-rail-dot" />`;
+
+  // Cota de proyección horizontal del panel (debajo del suelo).
+  const dimH = (x0, x1, value, y, label) => {
+    const mid = (x0 + x1) / 2;
+    return `
+      <g class="cross-dim">
+        <line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
+        <line x1="${x0}" y1="${y - 6}" x2="${x0}" y2="${y + 6}" />
+        <line x1="${x1}" y1="${y - 6}" x2="${x1}" y2="${y + 6}" />
+        <text x="${mid}" y="${y + 18}">${label}: ${value}</text>
+      </g>`;
+  };
+
+  // Cota del rise (vertical, a la izquierda del borde alto fila 1).
+  const riseDimX = r1x1 + 16;
+  const riseDim = `
+    <g class="cross-dim cross-dim-v">
+      <line x1="${riseDimX}" y1="${groundY}" x2="${riseDimX}" y2="${riseTopY}" marker-start="url(#dimStart)" marker-end="url(#dimEnd)" />
+      <text x="${riseDimX + 8}" y="${(groundY + riseTopY) / 2}" text-anchor="start">rise ${format(panelRise)}</text>
+    </g>`;
 
   return `
     <div class="cross-row-wrap">
-      <svg class="cross-row-visual" viewBox="0 0 ${width} ${height}" role="img" aria-label="Diagrama vertical de filas de paneles y distancia entre filas">
+      <svg class="cross-row-visual" viewBox="0 0 ${width} ${height}" role="img" aria-label="Vista de perfil de dos filas inclinadas y distancia entre filas">
         <defs>
-          <marker id="arrowUp" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
-            <path d="M 0 10 L 5 0 L 10 10 z" fill="#0f766e" />
+          <marker id="dimStart" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+            <path d="M 9 1 L 1 5 L 9 9" fill="none" stroke="#0f766e" stroke-width="1.6" />
           </marker>
-          <marker id="arrowDown" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
-            <path d="M 0 0 L 5 10 L 10 0 z" fill="#0f766e" />
+          <marker id="dimEnd" markerWidth="10" markerHeight="10" refX="2" refY="5" orient="auto">
+            <path d="M 1 1 L 9 5 L 1 9" fill="none" stroke="#0f766e" stroke-width="1.6" />
           </marker>
         </defs>
-        <rect x="18" y="18" width="964" height="424" rx="20" class="cross-row-bg" />
-        <polygon points="${topPanel}" class="cross-panel" />
-        <polygon points="${bottomPanel}" class="cross-panel cross-panel-alt" />
-        <line x1="${leftPad}" y1="${firstRailY}" x2="${leftPad + railWidth}" y2="${firstRailY}" class="cross-rail" />
-        <line x1="${leftPad}" y1="${secondRailY}" x2="${leftPad + railWidth}" y2="${secondRailY}" class="cross-rail" />
-        <line x1="${leftPad}" y1="${firstLowerRailY}" x2="${leftPad + railWidth}" y2="${firstLowerRailY}" class="cross-rail" />
-        <line x1="${leftPad}" y1="${secondLowerRailY}" x2="${leftPad + railWidth}" y2="${secondLowerRailY}" class="cross-rail" />
-        <text x="${railLabelX}" y="${panel1Y - 16}" class="cross-label">Fila 1: panel + tilt ${round(plan.tiltDeg).toFixed(2)}°</text>
-        <text x="${railLabelX}" y="${panel2Y - 16}" class="cross-label">Fila 2: panel + tilt ${round(plan.tiltDeg).toFixed(2)}°</text>
-        <line x1="930" y1="${rowGapArrowTop}" x2="930" y2="${rowGapArrowBottom}" class="cross-gap-arrow" marker-start="url(#arrowUp)" marker-end="url(#arrowDown)" />
-        <text x="930" y="${(rowGapArrowTop + rowGapArrowBottom) / 2}" class="cross-gap-label">${format(plan.rowGap)}</text>
-        <line x1="${leftPad + 40}" y1="${panel1Y + panelHeightPx - 14}" x2="${leftPad + 40}" y2="${panel2Y + 14}" class="cross-center-line" />
-        <text x="${leftPad + 54}" y="${rowGapLabelY}" class="cross-small">gap entre filas</text>
-        <text x="${leftPad + 54}" y="${rowGapLabelY + 18}" class="cross-small">distancia proyectada entre filas: ${format(crossRow.betweenRowsAdjacentRailFeet)}</text>
-        <text x="${leftPad + 54}" y="${rowGapLabelY + 36}" class="cross-small">proyección horizontal del panel: ${format(crossRow.panelProjection)}</text>
+        <rect x="18" y="18" width="964" height="414" rx="20" class="cross-row-bg" />
+
+        <text x="${leftPad}" y="48" class="cross-title" text-anchor="start">Vista de perfil · tilt ${tiltTxt}</text>
+
+        <!-- Suelo -->
+        <line x1="${leftPad - 8}" y1="${groundY}" x2="${width - rightPad + 8}" y2="${groundY}" class="cross-ground" />
+
+        ${triangle(r1x0, r1x1, "cross-tri-a")}
+        ${triangle(r2x0, r2x1, "cross-tri-b")}
+
+        <text x="${(r1x0 + r1x1) / 2}" y="${riseTopY - 14}" class="cross-label">Fila 1</text>
+        <text x="${(r2x0 + r2x1) / 2}" y="${riseTopY - 14}" class="cross-label">Fila 2</text>
+
+        ${riseDim}
+
+        <!-- Gap proyectado entre filas (sobre el suelo) -->
+        <g class="cross-gap-band">
+          <rect x="${r1x1}" y="${groundY - 14}" width="${r2x0 - r1x1}" height="28" rx="4" />
+          <text x="${(r1x1 + r2x0) / 2}" y="${groundY - 20}" class="cross-gap-label">gap ${format(rowGap)}</text>
+        </g>
+
+        <!-- Cotas horizontales -->
+        ${dimH(r1x0, r1x1, format(panelProj), groundY + 40, "proy. panel")}
+        ${dimH(r1x1, r2x0, format(crossRow.betweenRowsAdjacentRailFeet), groundY + 40, "entre filas")}
+        ${dimH(r2x0, r2x1, format(panelProj), groundY + 40, "proy. panel")}
+
+        <!-- Cota total (proy. fila 1 + gap + proy. fila 2) -->
+        ${dimH(r1x0, r2x1, format(totalReal), groundY + 80, "ancho total")}
       </svg>
       <div class="visual-legend cross-legend">
-        <span><i class="legend-row"></i> Filas de paneles</span>
-        <span><i class="legend-rail"></i> Rieles</span>
+        <span><i class="legend-row"></i> Paneles (perfil)</span>
+        <span><i class="legend-rail"></i> Apoyos / rieles</span>
         <span><i class="legend-gap"></i> Gap entre filas</span>
       </div>
     </div>`;

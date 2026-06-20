@@ -284,6 +284,26 @@ button {
   font-size: 13px;
 }
 
+.clamp-dist-mark line {
+  stroke: #b45309;
+  stroke-width: 2;
+}
+
+.clamp-dist-mark text {
+  fill: #92400e;
+  font-size: 13px;
+  font-weight: 800;
+  text-anchor: middle;
+}
+
+.band-title {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .visual-legend {
   display: flex;
   flex-wrap: wrap;
@@ -422,53 +442,85 @@ button {
   stroke: var(--line);
 }
 
-.cross-panel {
-  fill: rgba(245, 158, 11, 0.2);
-  stroke: rgba(245, 158, 11, 0.85);
+.cross-ground {
+  stroke: #94a3b8;
   stroke-width: 3;
-}
-
-.cross-panel-alt {
-  fill: rgba(20, 184, 166, 0.16);
-  stroke: rgba(15, 118, 110, 0.75);
-}
-
-.cross-rail {
-  stroke: #0f766e;
   stroke-linecap: round;
-  stroke-width: 10;
 }
 
-.cross-gap-arrow {
-  stroke: #0f766e;
-  stroke-width: 3;
-}
-
-.cross-center-line {
-  stroke: #64748b;
-  stroke-dasharray: 6 6;
+.cross-tri {
   stroke-width: 2;
 }
 
+.cross-tri-a {
+  fill: rgba(245, 158, 11, 0.18);
+  stroke: rgba(245, 158, 11, 0.7);
+}
+
+.cross-tri-b {
+  fill: rgba(20, 184, 166, 0.16);
+  stroke: rgba(15, 118, 110, 0.65);
+}
+
+.cross-panel-line {
+  stroke: #b45309;
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+.cross-tri-b + .cross-panel-line,
+.cross-tri-b ~ .cross-panel-line {
+  stroke: #0f766e;
+}
+
+.cross-rail-dot {
+  fill: #fff;
+  stroke: #7c2d12;
+  stroke-width: 2;
+}
+
+.cross-dim line {
+  stroke: #0f766e;
+  stroke-width: 1.6;
+}
+
+.cross-dim text {
+  fill: #134e4a;
+  font-size: 13px;
+  font-weight: 700;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: #f8fffd;
+  stroke-width: 5px;
+}
+
+.cross-gap-band rect {
+  fill: rgba(15, 118, 110, 0.14);
+  stroke: rgba(15, 118, 110, 0.55);
+  stroke-dasharray: 5 4;
+}
+
+.cross-title {
+  fill: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .cross-label,
-.cross-gap-label,
-.cross-small {
+.cross-gap-label {
   fill: #24413d;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 800;
   text-anchor: middle;
 }
 
 .cross-gap-label {
+  fill: #0f766e;
   paint-order: stroke;
   stroke: #f8fffd;
-  stroke-width: 7px;
-}
-
-.cross-small {
-  fill: var(--muted);
-  font-size: 13px;
-  text-anchor: start;
+  stroke-width: 6px;
 }
 
 .legend-row {
