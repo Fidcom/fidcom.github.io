@@ -480,15 +480,38 @@ button {
 }
 
 .cross-leg line {
+  stroke: #475569;
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+.cross-leg-short line {
+  stroke: #b45309;
+}
+
+.cross-leg-tall line {
   stroke: #134e4a;
-  stroke-width: 2;
-  stroke-dasharray: 3 3;
 }
 
 .cross-leg circle {
   fill: #f59e0b;
   stroke: #7c2d12;
   stroke-width: 2;
+}
+
+.cross-dim-leg-h line {
+  stroke: #b45309;
+}
+
+.cross-dim-leg-h .cross-ext {
+  stroke: #cbd5e1;
+  stroke-width: 1.2;
+  stroke-dasharray: 4 4;
+}
+
+.cross-dim-leg-h text {
+  fill: #92400e;
+  font-weight: 800;
 }
 
 .cross-leg text {
