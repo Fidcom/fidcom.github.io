@@ -155,12 +155,14 @@ button {
 .result-box {
   display: grid;
   gap: 1rem;
+  min-width: 0;
 }
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0.75rem;
+  min-width: 0;
 }
 
 .metric,
@@ -169,6 +171,7 @@ button {
   border-radius: 1rem;
   background: #fbfefd;
   padding: 0.85rem;
+  min-width: 0;
 }
 
 .metric span {
@@ -183,6 +186,7 @@ button {
   margin-top: 0.25rem;
   color: var(--primary-dark);
   font-size: 1.15rem;
+  overflow-wrap: anywhere;
 }
 
 .detail-panel h3 {
@@ -695,9 +699,6 @@ button {
     grid-template-columns: 1fr;
   }
 
-  .metric-grid {
-    grid-template-columns: 1fr 1fr;
-  }
 
   .layout-grid {
     grid-template-columns: 1fr;
