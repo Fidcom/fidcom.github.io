@@ -54,7 +54,8 @@ import {
   newWaypointsComponent,
   normalizePlan,
   num,
-  parseKml,
+  importKml as readKmlText,
+  exportKml,
   planPoints,
   componentPoints,
   projection,
@@ -1550,7 +1551,7 @@ function buildPlanBody(body) {
       ["waypoints", "Waypoints", "Un recorrido por puntos, con foto o espera en cada uno", () => addComponent(newWaypointsComponent())],
       ["camera", "Foto", "Una foto desde un punto, mirando hacia donde quieras", () => addComponent(newPhotoComponent())],
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => addComponent(newPanoComponent())],
-      ["upload", "Mapa desde KML o KMZ", "Importa el área de un archivo", () => importKml("component")],
+      ["upload", "Desde un KML o KMZ", "Áreas, líneas o puntos de Google Earth, Dronelink o DJI", () => importKml("component")],
     ]);
   });
   body.append(add);
@@ -1591,6 +1592,13 @@ function buildPlanBody(body) {
       buildPanel();
     });
   }
+
+  section(body, "ARCHIVO");
+  buttonRow(body, [
+    ["Exportar KMZ", hasGeometry(current) ? () => exportPlan(true) : null],
+    ["Exportar KML", hasGeometry(current) ? () => exportPlan(false) : null],
+  ]);
+  note(body, "Para verla en 3D en Google Earth. El archivo trae la misión entera: al importarlo aquí o en el teléfono queda igual.");
 }
 
 /** Tiempo de cada tramo del plan, como el "Mission Estimate" de Dronelink. */
@@ -2749,44 +2757,103 @@ $("kml-file").addEventListener("change", async (event) => {
   if (!file) return;
   try {
     const text = await readKml(file);
-    const result = text && parseKml(text);
-    if (!result) {
-      toast("Ese archivo no tiene un área (polígono) que se pueda usar", true);
+    const result = text ? readKmlText(text) : null;
+    const imported = result?.plan?.components ?? result?.components ?? [];
+    if (!imported.length) {
+      toast("Ese archivo no tiene áreas, líneas ni puntos que se puedan usar", true);
       return;
     }
-    const component = newMapComponent(result.points);
-    component.direction = MapPlanner.longestEdgeDirection(component.boundary) ?? 0;
     if (kmlTarget === "component" && current) {
-      addComponent(component);
+      // Se añaden a la misión abierta; uno que repita el identificador de otro recibe uno nuevo.
+      const ids = new Set(current.components.map((c) => c.id));
+      const added = imported.map((c) => (ids.has(c.id) ? { ...c, id: newMapComponent().id } : c));
+      changePlan(() => current.components.push(...added), added.length === 1 ? added[0].id : null);
     } else {
-      const plan = newPlan(result.name || file.name.replace(/\.km[lz]$/i, ""), [component]);
+      const plan = result.plan ? { ...result.plan, id: newPlan().id, updatedAt: Date.now() } : newPlan(result.name || file.name.replace(/\.km[lz]$/i, ""), imported);
       state.missions[plan.id] = plan;
       state.dirty[plan.id] = true;
       persist();
       scheduleSync();
-      openPlan(plan.id, null, component.id);
+      openPlan(plan.id, null, plan.components.length === 1 ? plan.components[0].id : null);
     }
-    toast(`Área importada: ${component.boundary.length} esquinas`);
+    toast(result.plan ? `Misión importada: ${imported.length} ${imported.length === 1 ? "componente" : "componentes"}` : `Importado: ${importedText(imported)}`);
   } catch (error) {
     toast(`No se pudo leer el archivo: ${error.message}`, true);
   }
 });
 
-/** Un KMZ es un ZIP con el KML adentro; JSZip se carga solo cuando hace falta. */
+/** "1 mapa, 2 corredores y 1 recorrido de 12 puntos". */
+function importedText(components) {
+  const count = (type) => components.filter((c) => c.type === type).length;
+  const parts = [];
+  const add = (n, one, many) => n && parts.push(`${n} ${n === 1 ? one : many}`);
+  add(count("map"), "mapa", "mapas");
+  add(count("corridor"), "corredor", "corredores");
+  add(count("orbit"), "órbita", "órbitas");
+  for (const c of components.filter((c) => c.type === "waypoints")) parts.push(`un recorrido de ${c.points.length} puntos`);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}` : parts[0];
+}
+
+/** JSZip se carga solo cuando hace falta (para leer o crear un KMZ). */
+async function loadJsZip() {
+  if (window.JSZip) return window.JSZip;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("no se pudo cargar el lector de KMZ"));
+    document.head.append(script);
+  });
+  return window.JSZip;
+}
+
+/**
+ * Guarda la misión como KMZ (o KML) para Google Earth. Con internet, las alturas van sobre el nivel
+ * del mar con los datos del suelo; sin ellos, sobre el suelo.
+ */
+async function exportPlan(kmz) {
+  const plan = current;
+  if (!plan || !hasGeometry(plan)) return toast("La misión todavía no tiene nada que exportar", true);
+  let ground = null;
+  const takeoff = takeoffOf(plan);
+  if (takeoff) {
+    await ensureTerrain(planPoints(plan));
+    const base = terrain.elevation(takeoff);
+    if (base !== null) ground = TerrainFollow.reference(terrain, base);
+  }
+  let kml;
+  try {
+    kml = exportKml(plan, ground);
+  } catch {
+    // Falta el suelo en parte de la ruta: mejor todo sobre el suelo que a medias.
+    ground = null;
+    kml = exportKml(plan);
+  }
+  const name = plan.name.replace(/[\\/:*?"<>|]+/g, " ").trim() || "Misión";
+  let blob;
+  if (kmz) {
+    const JSZip = await loadJsZip();
+    const zip = new JSZip();
+    zip.file("doc.kml", kml);
+    blob = await zip.generateAsync({ type: "blob", mimeType: "application/vnd.google-earth.kmz", compression: "DEFLATE" });
+  } else {
+    blob = new Blob([kml], { type: "application/vnd.google-earth.kml+xml" });
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${name}.${kmz ? "kmz" : "kml"}`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+  toast(ground ? `Exportado ${link.download}` : `Exportado ${link.download} (sin datos del terreno: alturas sobre el suelo)`);
+}
+
+/** Un KMZ es un ZIP con el KML adentro (DJI lo guarda en wpmz/template.kml). */
 async function readKml(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) return new TextDecoder().decode(bytes);
-  if (!window.JSZip) {
-    await new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-      script.onload = resolve;
-      script.onerror = () => reject(new Error("no se pudo cargar el lector de KMZ"));
-      document.head.append(script);
-    });
-  }
-  const zip = await window.JSZip.loadAsync(bytes);
-  const entry = Object.values(zip.files).find((f) => f.name.toLowerCase().endsWith(".kml"));
+  const zip = await (await loadJsZip()).loadAsync(bytes);
+  const entries = Object.values(zip.files).filter((f) => f.name.toLowerCase().endsWith(".kml"));
+  const entry = entries.find((f) => /(^|\/)doc\.kml$/i.test(f.name)) ?? entries[0];
   return entry ? entry.async("string") : null;
 }
 
