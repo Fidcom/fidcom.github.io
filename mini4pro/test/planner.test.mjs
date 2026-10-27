@@ -8,18 +8,28 @@ import {
   MINI_4_PRO,
   MINI_4_PRO_12MP,
   OrbitPlanner,
+  PanoPlan,
   PlanPlanner,
+  componentName,
   componentPoints,
   copyComponent,
+  endAltitude,
+  isKnown,
   newMapComponent,
   newOrbitComponent,
+  newPanoComponent,
+  newPhotoComponent,
   newPlan,
+  newWaypoint,
+  newWaypointsComponent,
   normalizePlan,
   parseKml,
   planPoints,
   projection,
   serializePlan,
+  startAltitude,
   takeoffOf,
+  waypointHeading,
 } from "../planner.js";
 
 const near = (actual, expected, tolerance, message) =>
@@ -291,4 +301,116 @@ test("encuadrar el plan incluye la H automática", () => {
   assert.equal(points.length, square.length + 1);
   assert.deepEqual(points.at(-1), takeoffOf(plan));
   assert.deepEqual(componentPoints(plan.components[0]), square);
+});
+
+// ---- Waypoints, foto y panorámica (PointComponentsTest.kt) ----
+
+/** Una misión con los tres tipos nuevos y uno de una versión futura, la misma que se probó en Kotlin. */
+const pointsFixture = {
+  version: 2,
+  id: "p1",
+  name: "Paridad",
+  finishAction: "GO_HOME",
+  transitSpeed: 8,
+  takeoff: [18.1795, -65.8205],
+  components: [
+    {
+      id: "a",
+      type: "waypoints",
+      altitude: 30,
+      speed: 4,
+      gimbalPitch: -20,
+      captureMode: "photo",
+      photoInterval: 4,
+      photoSize: "12mp",
+      points: [
+        { position: [18.18, -65.82], altitude: 15, action: "none", hoverSeconds: 3 },
+        { position: [18.1804, -65.8196], altitude: 25, heading: 90, gimbalPitch: -45, action: "photo", hoverSeconds: 3 },
+        { position: [18.1801, -65.8191], altitude: 10, action: "hover", hoverSeconds: 6 },
+      ],
+    },
+    { id: "b", type: "photo", altitude: 20, position: [18.1808, -65.8188], heading: 180, gimbalPitch: -60, photoType: "aeb3" },
+    { id: "c", type: "pano", altitude: 45, position: [18.1812, -65.8193], panoType: "wide", heading: 30, gimbalPitch: -20 },
+    { id: "d", type: "corridor", name: "Futuro", altitude: 35, width: 40 },
+  ],
+};
+
+test("waypoints, foto y panorámica dan el mismo tiempo y las mismas fotos que en el teléfono", () => {
+  const plan = normalizePlan(structuredClone(pointsFixture));
+  const result = PlanPlanner.plan(plan);
+  // Los números que da PlanPlanner.kt con esta misma misión.
+  near(result.durationSeconds, 186.63, 0.01);
+  near(result.lengthMeters, 581.2151, 0.01);
+  assert.equal(result.photoCount, 23);
+  assert.equal(result.flown, 3);
+  const [waypoints, photo, pano, future] = result.items;
+  near(waypoints.result.durationSeconds, 51.2896, 0.001);
+  assert.equal(waypoints.result.photoCount, 11);
+  near(waypoints.approach.durationSeconds, 14.5862, 0.001);
+  assert.equal(photo.result.photoCount, 3);
+  near(pano.result.durationSeconds, 40.5, 0.001);
+  assert.equal(future.result, null);
+});
+
+test("waypoints: empieza a la altura del primer punto y termina a la del último", () => {
+  const plan = normalizePlan(structuredClone(pointsFixture));
+  const waypoints = plan.components[0];
+  assert.equal(startAltitude(waypoints), 15);
+  assert.equal(endAltitude(waypoints), 10);
+  // Sin rumbo propio mira hacia donde llega volando; el primero, hacia el segundo.
+  near(waypointHeading(waypoints, 0), 43.534, 0.01);
+  assert.equal(waypointHeading(waypoints, 1), 90);
+  near(waypointHeading(waypoints, 2), 122.273, 0.01);
+  assert.equal(waypointHeading(waypoints, 0, 200), 200);
+});
+
+test("panorámicas: las mismas fotos que en Panorama.kt", () => {
+  assert.equal(PanoPlan.shots("sphere", 30, -10).length, 23);
+  assert.equal(PanoPlan.shots("180", 0, 0).length, 15);
+  const wide = PanoPlan.shots("wide", 90, -30);
+  assert.deepEqual([...new Set(wide.map((s) => s.pitch))], [-5, -30, -55]);
+  assert.deepEqual([...new Set(wide.map((s) => s.heading))].sort((a, b) => a - b), [50, 90, 130]);
+  assert.deepEqual(PanoPlan.shots("vertical", 90, 0).map((s) => s.pitch), [0, -35, -70]);
+  // Las filas van y vienen: nunca da la vuelta entera entre dos fotos.
+  for (const type of ["sphere", "180", "wide", "vertical"]) {
+    const shots = PanoPlan.shots(type, 0, -20);
+    for (let i = 1; i < shots.length; i++) {
+      const turn = Math.abs(((shots[i].heading - shots[i - 1].heading + 540) % 360) - 180);
+      assert.ok(turn <= 90, `${type} gira ${turn}°`);
+    }
+  }
+});
+
+test("los componentes nuevos se guardan y se leen igual, sin campos vacíos", () => {
+  const waypoints = newWaypointsComponent([newWaypoint(origin, 20), { ...newWaypoint(pr.toGeo({ x: 30, y: 0 }), 25), heading: 90, action: "photo" }]);
+  const plan = newPlan("Puntos", [waypoints, newPhotoComponent(pr.toGeo({ x: 5, y: 5 })), { ...newPanoComponent(origin), panoType: "vertical" }]);
+  const text = serializePlan(plan);
+  assert.ok(!text.includes("null"));
+  assert.deepEqual(normalizePlan(JSON.parse(text)), plan);
+});
+
+test("un componente de una versión más nueva se guarda tal cual y no se vuela", () => {
+  const plan = normalizePlan(structuredClone(pointsFixture));
+  const future = plan.components[3];
+  assert.equal(isKnown(future), false);
+  assert.equal(componentName(future), "Futuro");
+  assert.equal(componentName({ ...future, name: undefined }), "Componente nuevo (corridor)");
+  future.name = "Río";
+  future.enabled = false;
+  const saved = JSON.parse(serializePlan(plan)).components[3];
+  assert.deepEqual(saved, { id: "d", type: "corridor", name: "Río", altitude: 35, width: 40, enabled: false });
+});
+
+test("waypoints, foto y panorámica: duplicar, despegue automático y encuadre", () => {
+  const waypoints = newWaypointsComponent([newWaypoint(origin, 20), newWaypoint(pr.toGeo({ x: 40, y: 0 }), 20)]);
+  const copy = copyComponent(waypoints);
+  // El recorrido mide 40 m de ancho: la copia queda 50 m al este.
+  near(pr.toLocal(copy.points[0].position).x, 50, 0.5);
+  near(pr.toLocal(copy.points[1].position).x, 90, 0.5);
+  const photo = newPhotoComponent(origin);
+  near(Geo.distance(origin, copyComponent(photo).position), 10, 0.5);
+  // El despegue automático va 40 m al sur del primer punto.
+  near(pr.toLocal(takeoffOf(newPlan("x", [waypoints]))).y, -40, 0.5);
+  assert.deepEqual(componentPoints(photo), [origin]);
+  assert.equal(componentPoints(newPanoComponent()).length, 0);
 });

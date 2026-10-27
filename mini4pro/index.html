@@ -11,7 +11,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="styles.css?v=20261027e" />
+    <link rel="stylesheet" href="styles.css?v=20261028a" />
   </head>
   <body>
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
@@ -37,6 +37,10 @@
       <symbol id="i-add" viewBox="0 0 24 24"><path d="M19,13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" /></symbol>
       <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M10,6L8.59,7.41 13.17,12l-4.58,4.59L10,18l6,-6z" /></symbol>
       <symbol id="i-qr" viewBox="0 0 24 24"><path d="M3,11h8V3H3V11zM5,5h4v4H5V5zM3,21h8v-8H3V21zM5,15h4v4H5V15zM13,3v8h8V3H13zM19,9h-4V5h4V9zM19,19h2v2h-2zM13,13h2v2h-2zM15,15h2v2h-2zM13,17h2v2h-2zM15,19h2v2h-2zM17,17h2v2h-2zM17,13h2v2h-2zM19,15h2v2h-2z" /></symbol>
+      <symbol id="i-waypoints" viewBox="0 0 24 24"><path d="M5,18.5L11,6.5L19,14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /><circle cx="5" cy="18.5" r="3" /><circle cx="11" cy="6.5" r="3" /><circle cx="19" cy="14" r="3" /></symbol>
+      <symbol id="i-camera" viewBox="0 0 24 24"><path d="M9,2L7.17,4H4c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V6c0,-1.1 -0.9,-2 -2,-2h-3.17L15,2H9zM12,17c-2.76,0 -5,-2.24 -5,-5s2.24,-5 5,-5 5,2.24 5,5 -2.24,5 -5,5zM12,8.8c-1.77,0 -3.2,1.43 -3.2,3.2s1.43,3.2 3.2,3.2 3.2,-1.43 3.2,-3.2 -1.43,-3.2 -3.2,-3.2z" /></symbol>
+      <symbol id="i-pano" viewBox="0 0 24 24"><path d="M20,6.54v10.91c-2.6,-0.77 -5.28,-1.16 -8,-1.16 -2.72,0 -5.4,0.39 -8,1.16V6.54c2.6,0.77 5.28,1.16 8,1.16 2.72,0.01 5.4,-0.38 8,-1.16M21.43,4c-0.1,0 -0.2,0.02 -0.31,0.06C18.18,5.16 15.09,5.7 12,5.7c-3.09,0 -6.18,-0.55 -9.12,-1.64C2.77,4.02 2.66,4 2.57,4c-0.34,0 -0.57,0.23 -0.57,0.63v14.75c0,0.39 0.23,0.62 0.57,0.62 0.1,0 0.2,-0.02 0.31,-0.06 2.94,-1.1 6.03,-1.64 9.12,-1.64 3.09,0 6.18,0.55 9.12,1.64 0.11,0.04 0.21,0.06 0.31,0.06 0.33,0 0.57,-0.23 0.57,-0.63V4.63c0,-0.4 -0.24,-0.63 -0.57,-0.63z" /></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6,19h4V5H6v14zM14,5v14h4V5h-4z" /></symbol>
       <symbol id="i-move" viewBox="0 0 24 24"><path d="M10,9h4V6h3l-5,-5 -5,5h3v3zM9,10H6V7l-5,5 5,5v-3h3v-4zM23,12l-5,-5v3h-3v4h3v3l5,-5zM14,15h-4v3H7l5,5 5,-5h-3v-3z" /></symbol>
     </svg>
 
@@ -61,14 +65,15 @@
         <div class="new-actions">
           <button id="new-map" class="button primary" type="button"><svg><use href="#i-grid" /></svg>Nuevo mapa</button>
           <button id="new-orbit" class="button primary" type="button"><svg><use href="#i-orbit" /></svg>Nueva órbita</button>
+          <button id="new-more" class="button primary icon-only" type="button" title="Otra misión: waypoints, foto o panorámica" aria-label="Otra misión: waypoints, foto o panorámica"><svg><use href="#i-add" /></svg></button>
         </div>
         <button id="import-kml" class="button outline wide" type="button"><svg><use href="#i-upload" /></svg>Importar área KML o KMZ</button>
         <input id="kml-file" type="file" accept=".kml,.kmz" hidden />
 
         <div id="mission-list" class="mission-list"></div>
         <p id="list-empty" class="empty" hidden>
-          Todavía no hay misiones. Crea un mapa o una órbita, o importa un área desde un archivo KML de Google Earth o
-          Dronelink.
+          Todavía no hay misiones. Crea un mapa, una órbita, unos waypoints, una foto o una panorámica, o importa un
+          área desde un archivo KML de Google Earth o Dronelink.
         </p>
       </section>
 
@@ -121,7 +126,7 @@
       <div id="edit-tools" class="tool-group" hidden>
         <button id="tool-undo" class="tool" type="button" title="Deshacer (Ctrl+Z)"><svg><use href="#i-undo" /></svg></button>
         <button id="tool-redo" class="tool" type="button" title="Rehacer (Ctrl+Y)"><svg><use href="#i-redo" /></svg></button>
-        <button id="tool-clear" class="tool" type="button" title="Borrar el área o el centro del componente"><svg><use href="#i-delete" /></svg></button>
+        <button id="tool-clear" class="tool" type="button" title="Borrar el área, el centro o los puntos del componente"><svg><use href="#i-delete" /></svg></button>
       </div>
       <div class="tool-group">
         <button id="tool-fit" class="tool" type="button" title="Ver toda la misión"><svg><use href="#i-fit" /></svg></button>
@@ -187,6 +192,6 @@
     </dialog>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script type="module" src="app.js?v=20261027e"></script>
+    <script type="module" src="app.js?v=20261028a"></script>
   </body>
 </html>
