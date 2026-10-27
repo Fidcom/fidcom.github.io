@@ -638,9 +638,25 @@ export function serializePlan(plan) {
   return JSON.stringify({ ...compact(plan), components: plan.components.map(compact) }, null, 2) + "\n";
 }
 
-/** Copia de un componente con otro identificador, para duplicarlo. */
-export function copyComponent(component) {
-  return { ...structuredClone(component), id: componentId() };
+/**
+ * Copia de un componente con otro identificador, para duplicarlo. Va justo al este del original,
+ * a `gap` metros, para que no quede encima.
+ */
+export function copyComponent(component, gap = 10) {
+  const copy = { ...structuredClone(component), id: componentId() };
+  const anchor = anchorOf(component);
+  if (!anchor) return copy;
+  const pr = projection(anchor);
+  if (copy.type === "map") {
+    const xs = copy.boundary.map((p) => pr.toLocal(p).x);
+    const to = pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + gap, y: 0 });
+    copy.boundary = Geo.translate(copy.boundary, anchor, to);
+    if (copy.start) copy.start = Geo.translate([copy.start], anchor, to)[0];
+  } else {
+    const radius = Math.max(copy.radius, copy.finalRadius ?? 0);
+    copy.center = pr.toGeo({ x: 2 * radius + gap, y: 0 });
+  }
+  return copy;
 }
 
 export const componentName = (component) => component.name || (component.type === "map" ? "Mapa" : "Órbita");
