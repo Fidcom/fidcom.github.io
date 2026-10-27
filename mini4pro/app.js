@@ -19,6 +19,7 @@ const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
 const TOKEN_KEY = "mini4pro.githubToken";
 const LABELS_KEY = "mini4pro.labels";
+const BASE_KEY = "mini4pro.baseLayer";
 const DEFAULT_VIEW = { center: [18.2, -66.45], zoom: 9 };
 const ACCENT = "#2f9bff";
 /** Más líneas que esto es un área demasiado grande para un vuelo; no se dibuja la ruta. */
@@ -68,11 +69,27 @@ const toPoint = (latlng) => [Math.round(latlng.lat * 1e7) / 1e7, Math.round(latl
 // ---------- Mapa ----------
 
 const map = L.map("map", { zoomControl: false, maxZoom: 21, worldCopyJump: true, attributionControl: true });
-L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-  maxZoom: 21,
-  maxNativeZoom: 19,
-  attribution: "Imágenes © Esri, Maxar, Earthstar Geographics",
-}).addTo(map);
+
+/** Imágenes de Bing: los mosaicos se piden por "quadkey" en vez de z/x/y. */
+const BingLayer = L.TileLayer.extend({
+  getTileUrl(coords) {
+    let quadkey = "";
+    for (let i = coords.z; i > 0; i--) {
+      const mask = 1 << (i - 1);
+      quadkey += ((coords.x & mask) ? 1 : 0) + ((coords.y & mask) ? 2 : 0);
+    }
+    return `https://ecn.t${(coords.x + coords.y) % 4}.tiles.virtualearth.net/tiles/a${quadkey}.jpeg?g=14000`;
+  },
+});
+
+const baseLayers = {
+  esri: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 21,
+    maxNativeZoom: 19,
+    attribution: "Imágenes © Esri, Maxar, Earthstar Geographics",
+  }),
+  bing: new BingLayer("", { maxZoom: 21, maxNativeZoom: 19, attribution: "Imágenes © Microsoft Bing" }),
+};
 const labels = L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
   { maxZoom: 21, maxNativeZoom: 19 },
@@ -910,13 +927,35 @@ $("tool-locate").addEventListener("click", () => {
   );
 });
 
+// Capas: imágenes de Esri o de Bing, y nombres de lugares encima.
+function setBase(key) {
+  for (const [name, layer] of Object.entries(baseLayers)) {
+    if (name === key) layer.addTo(map).bringToBack();
+    else map.removeLayer(layer);
+  }
+  document.querySelectorAll("#layer-menu [data-base]").forEach((b) => b.classList.toggle("selected", b.dataset.base === key));
+  storage.set(BASE_KEY, key);
+}
+
 function setLabels(on) {
   if (on) labels.addTo(map);
   else map.removeLayer(labels);
-  $("tool-labels").classList.toggle("active", on);
+  $("layer-labels").classList.toggle("selected", on);
   storage.set(LABELS_KEY, on ? "1" : "0");
 }
-$("tool-labels").addEventListener("click", () => setLabels(!map.hasLayer(labels)));
+
+$("tool-layers").addEventListener("click", (event) => {
+  event.stopPropagation();
+  $("layer-menu").hidden = !$("layer-menu").hidden;
+});
+document.querySelectorAll("#layer-menu [data-base]").forEach((button) =>
+  button.addEventListener("click", () => setBase(button.dataset.base)),
+);
+$("layer-labels").addEventListener("click", () => setLabels(!map.hasLayer(labels)));
+document.addEventListener("click", (event) => {
+  if (!$("layer-menu").contains(event.target)) $("layer-menu").hidden = true;
+});
+setBase(baseLayers[storage.get(BASE_KEY)] ? storage.get(BASE_KEY) : "bing");
 setLabels(storage.get(LABELS_KEY) !== "0");
 
 document.addEventListener("keydown", (event) => {
