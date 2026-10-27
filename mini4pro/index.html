@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0e11" />
+    <meta name="robots" content="noindex" />
+    <title>Mini 4 Pro · Misiones</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <symbol id="i-grid" viewBox="0 0 24 24"><path d="M20,2H4c-1.1,0 -2,0.9 -2,2v16c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V4c0,-1.1 -0.9,-2 -2,-2zM8,20H4v-4h4v4zM8,14H4v-4h4v4zM8,8H4V4h4v4zM14,20h-4v-4h4v4zM14,14h-4v-4h4v4zM14,8h-4V4h4v4zM20,20h-4v-4h4v4zM20,14h-4v-4h4v4zM20,8h-4V4h4v4z" /></symbol>
+      <symbol id="i-orbit" viewBox="0 0 24 24"><path d="M12,6v3l4,-4 -4,-4v3c-4.42,0 -8,3.58 -8,8 0,1.57 0.46,3.03 1.24,4.26L6.7,14.8c-0.45,-0.83 -0.7,-1.79 -0.7,-2.8 0,-3.31 2.69,-6 6,-6zM18.76,7.74L17.3,9.2c0.44,0.84 0.7,1.79 0.7,2.8 0,3.31 -2.69,6 -6,6v-3l-4,4 4,4v-3c4.42,0 8,-3.58 8,-8 0,-1.57 -0.46,-3.03 -1.24,-4.26z" /></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M9,16h6v-6h4l-7,-7 -7,7h4zM5,18h14v2H5z" /></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M19,6.41L17.59,5 12,10.59 6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 12,13.41 17.59,19 19,17.59 13.41,12z" /></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path d="M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z" /></symbol>
+      <symbol id="i-undo" viewBox="0 0 24 24"><path d="M12.5,8c-2.65,0 -5.05,0.99 -6.9,2.6L2,7v9h9l-3.62,-3.62c1.39,-1.16 3.16,-1.88 5.12,-1.88 3.54,0 6.55,2.31 7.6,5.5l2.37,-0.78C21.08,11.03 17.15,8 12.5,8z" /></symbol>
+      <symbol id="i-redo" viewBox="0 0 24 24"><path d="M18.4,10.6C16.55,8.99 14.15,8 11.5,8c-4.65,0 -8.58,3.03 -9.96,7.22L3.9,16c1.05,-3.19 4.05,-5.5 7.6,-5.5 1.95,0 3.73,0.72 5.12,1.88L13,16h9V7l-3.6,3.6z" /></symbol>
+      <symbol id="i-delete" viewBox="0 0 24 24"><path d="M6,19c0,1.1 0.9,2 2,2h8c1.1,0 2,-0.9 2,-2V7H6v12zM19,4h-3.5l-1,-1h-5l-1,1H5v2h14V4z" /></symbol>
+      <symbol id="i-gps" viewBox="0 0 24 24"><path d="M12,8c-2.21,0 -4,1.79 -4,4s1.79,4 4,4 4,-1.79 4,-4 -1.79,-4 -4,-4zM20.94,11c-0.46,-4.17 -3.77,-7.48 -7.94,-7.94V1h-2v2.06C6.83,3.52 3.52,6.83 3.06,11H1v2h2.06c0.46,4.17 3.77,7.48 7.94,7.94V23h2v-2.06c4.17,-0.46 7.48,-3.77 7.94,-7.94H23v-2h-2.06zM12,19c-3.87,0 -7,-3.13 -7,-7s3.13,-7 7,-7 7,3.13 7,7 -3.13,7 -7,7z" /></symbol>
+      <symbol id="i-labels" viewBox="0 0 24 24"><path d="M11.99,18.54l-7.37,-5.73L3,14.07l9,7 9,-7 -1.63,-1.27 -7.38,5.74zM12,16l7.36,-5.73L21,9l-9,-7 -9,7 1.63,1.27L12,16z" /></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><path d="M15.5,14h-0.79l-0.28,-0.27C15.41,12.59 16,11.11 16,9.5 16,5.91 13.09,3 9.5,3S3,5.91 3,9.5 5.91,16 9.5,16c1.61,0 3.09,-0.59 4.23,-1.57l0.27,0.28v0.79l5,4.99L20.49,19l-4.99,-5zM9.5,14C7.01,14 5,11.99 5,9.5S7.01,5 9.5,5 14,7.01 14,9.5 11.99,14 9.5,14z" /></symbol>
+      <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M19.35,10.04C18.67,6.59 15.64,4 12,4 9.11,4 6.6,5.64 5.35,8.04 2.34,8.36 0,10.91 0,14c0,3.31 2.69,6 6,6h13c2.76,0 5,-2.24 5,-5 0,-2.64 -2.05,-4.78 -4.65,-4.96z" /></symbol>
+      <symbol id="i-fit" viewBox="0 0 24 24"><path d="M3,5v4h2V5h4V3H5c-1.1,0 -2,0.9 -2,2zM5,15H3v4c0,1.1 0.9,2 2,2h4v-2H5v-4zM19,19h-4v2h4c1.1,0 2,-0.9 2,-2v-4h-2v4zM19,3h-4v2h4v4h2V5c0,-1.1 -0.9,-2 -2,-2z" /></symbol>
+    </svg>
+
+    <div id="map" aria-label="Mapa"></div>
+
+    <aside id="panel">
+      <!-- Lista de misiones -->
+      <section id="list-view" class="view">
+        <header class="panel-header">
+          <div class="brand">
+            <div class="brand-mark"><svg><use href="#i-grid" /></svg></div>
+            <div>
+              <h1>Misiones</h1>
+              <p>DJI Mini 4 Pro</p>
+            </div>
+          </div>
+          <button id="sync-chip" class="sync-chip" type="button" title="Sincronización con el teléfono">
+            <span class="dot"></span><span class="label">Sin conectar</span>
+          </button>
+        </header>
+
+        <div class="new-actions">
+          <button id="new-map" class="button primary" type="button"><svg><use href="#i-grid" /></svg>Nuevo mapa</button>
+          <button id="new-orbit" class="button primary" type="button"><svg><use href="#i-orbit" /></svg>Nueva órbita</button>
+        </div>
+        <button id="import-kml" class="button outline wide" type="button"><svg><use href="#i-upload" /></svg>Importar área KML o KMZ</button>
+        <input id="kml-file" type="file" accept=".kml,.kmz" hidden />
+
+        <div id="mission-list" class="mission-list"></div>
+        <p id="list-empty" class="empty" hidden>
+          Todavía no hay misiones. Crea un mapa o una órbita, o importa un área desde un archivo KML de Google Earth o
+          Dronelink.
+        </p>
+      </section>
+
+      <!-- Editor -->
+      <section id="editor-view" class="view" hidden>
+        <header class="panel-header editor-header">
+          <button id="editor-back" class="icon-button" type="button" title="Volver a la lista (Esc)"><svg><use href="#i-back" /></svg></button>
+          <svg id="editor-type-icon" class="type-icon"><use href="#i-grid" /></svg>
+          <input id="editor-name" class="name-input" type="text" maxlength="80" spellcheck="false" aria-label="Nombre de la misión" />
+          <button id="editor-done" class="button primary small" type="button">Listo</button>
+        </header>
+        <p id="editor-summary" class="summary"></p>
+        <div id="editor-stats" class="stats"></div>
+        <div id="editor-params" class="params"></div>
+        <footer class="editor-footer">
+          <button id="editor-delete" class="button danger-outline small" type="button"><svg><use href="#i-delete" /></svg>Borrar misión</button>
+        </footer>
+      </section>
+    </aside>
+
+    <!-- Herramientas del mapa -->
+    <div id="map-search" class="map-search">
+      <svg><use href="#i-search" /></svg>
+      <input id="search-input" type="search" placeholder="Buscar un lugar o pegar coordenadas" autocomplete="off" />
+      <div id="search-results" class="search-results" hidden></div>
+    </div>
+
+    <div id="map-tools" class="map-tools">
+      <div id="edit-tools" class="tool-group" hidden>
+        <button id="tool-undo" class="tool" type="button" title="Deshacer (Ctrl+Z)"><svg><use href="#i-undo" /></svg></button>
+        <button id="tool-redo" class="tool" type="button" title="Rehacer (Ctrl+Y)"><svg><use href="#i-redo" /></svg></button>
+        <button id="tool-clear" class="tool" type="button" title="Borrar el área o el centro"><svg><use href="#i-delete" /></svg></button>
+      </div>
+      <div class="tool-group">
+        <button id="tool-fit" class="tool" type="button" title="Ver toda la misión"><svg><use href="#i-fit" /></svg></button>
+        <button id="tool-locate" class="tool" type="button" title="Ir a mi ubicación"><svg><use href="#i-gps" /></svg></button>
+        <button id="tool-labels" class="tool active" type="button" title="Mostrar nombres de lugares"><svg><use href="#i-labels" /></svg></button>
+      </div>
+    </div>
+
+    <div id="map-hint" class="map-hint" hidden></div>
+    <div id="toast" class="toast" hidden></div>
+
+    <!-- Sincronización -->
+    <dialog id="sync-dialog" class="dialog">
+      <form method="dialog" id="sync-form">
+        <header>
+          <svg class="dialog-icon"><use href="#i-cloud" /></svg>
+          <h2>Sincronizar con el teléfono</h2>
+        </header>
+        <p>
+          Las misiones se guardan en tu repositorio privado <b>Fidcom/mini4pro-app</b>, en la rama <b>misiones</b>.
+          La app Mini4Pro del Pixel lee la misma carpeta, así que lo que planifiques aquí aparece allá.
+        </p>
+        <ol class="steps">
+          <li>Abre <a id="token-link" target="_blank" rel="noopener">crear un token de GitHub</a>.</li>
+          <li>Nombre: <b>Mini4Pro misiones</b>. Expiración: la que prefieras, por ejemplo un año.</li>
+          <li>En <b>Repository access</b> escoge <b>Only select repositories</b> y marca <b>Fidcom/mini4pro-app</b>.</li>
+          <li>En <b>Permissions → Repository permissions</b>, pon <b>Contents</b> en <b>Read and write</b>.</li>
+          <li>Pulsa <b>Generate token</b>, cópialo y pégalo aquí.</li>
+        </ol>
+        <label class="field">
+          <span>Token</span>
+          <input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_…" />
+        </label>
+        <p class="fine">El token se guarda solo en este navegador. No se sube a ningún sitio más que a GitHub.</p>
+        <p id="sync-error" class="error" hidden></p>
+        <div class="dialog-actions">
+          <button id="token-remove" class="button text" type="button">Desconectar</button>
+          <span class="spacer"></span>
+          <button class="button text" value="cancel" type="submit" formnovalidate>Cancelar</button>
+          <button id="token-save" class="button primary" type="button">Conectar</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

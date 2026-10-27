@@ -28,3 +28,10 @@ git push origin main
 ```
 
 En GitHub, revisa **Settings → Pages** y confirma que el source sea `Deploy from a branch`, rama `main`, carpeta `/root`.
+## Planificador de misiones Mini 4 Pro
+
+`mini4pro/` es el planificador web de misiones Map y Orbit para el DJI Mini 4 Pro, el compañero de PC de la
+app Mini4Pro. Se abre en `https://fidcom.github.io/mini4pro/`. Las misiones se sincronizan con la rama
+`misiones` del repositorio privado `Fidcom/mini4pro-app` usando un token que queda solo en el navegador.
+
+Pruebas: `node --test mini4pro/test/planner.test.mjs mini4pro/test/sync.test.mjs`

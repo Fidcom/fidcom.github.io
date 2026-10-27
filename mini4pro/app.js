@@ -1,0 +1,1142 @@
+// Planificador de misiones para el DJI Mini 4 Pro: la versión de PC del editor de la app Mini4Pro.
+// Las misiones se guardan en este navegador y, si hay token, en GitHub para que las lea el teléfono.
+import {
+  FINISH_ACTIONS,
+  Geo,
+  MapPlanner,
+  OrbitPlanner,
+  formatDuration,
+  geometry,
+  newMapMission,
+  newOrbitMission,
+  num,
+  parseKml,
+  summary,
+} from "./planner.js";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js";
+
+const $ = (id) => document.getElementById(id);
+const STATE_KEY = "mini4pro.state.v1";
+const TOKEN_KEY = "mini4pro.githubToken";
+const LABELS_KEY = "mini4pro.labels";
+const DEFAULT_VIEW = { center: [18.2, -66.45], zoom: 9 };
+const ACCENT = "#2f9bff";
+/** Más líneas que esto es un área demasiado grande para un vuelo; no se dibuja la ruta. */
+const MAX_LEGS = 400;
+
+const storage = {
+  get(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key, value) {
+    try {
+      if (value === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, value);
+    } catch {
+      // Sin almacenamiento (ventana privada): la página sigue funcionando, solo no recuerda nada.
+    }
+  },
+};
+
+// ---------- Estado ----------
+
+/** missions: misiones por id · shas: versión sincronizada · dirty: por subir · deleted: por borrar en GitHub */
+const state = (() => {
+  try {
+    const saved = JSON.parse(storage.get(STATE_KEY));
+    if (saved?.missions) return { shas: {}, dirty: {}, deleted: {}, ...saved };
+  } catch {
+    // Estado dañado: se empieza de cero.
+  }
+  return { missions: {}, shas: {}, dirty: {}, deleted: {} };
+})();
+
+const persist = () => storage.set(STATE_KEY, JSON.stringify(state));
+let token = storage.get(TOKEN_KEY) || "";
+
+/** Misión abierta en el editor (una copia); null en la lista. */
+let current = null;
+let undoStack = [];
+let redoStack = [];
+const clone = (value) => structuredClone(value);
+const toPoint = (latlng) => [Math.round(latlng.lat * 1e7) / 1e7, Math.round(latlng.lng * 1e7) / 1e7];
+
+// ---------- Mapa ----------
+
+const map = L.map("map", { zoomControl: false, maxZoom: 21, worldCopyJump: true, attributionControl: true });
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 21,
+  maxNativeZoom: 19,
+  attribution: "Imágenes © Esri, Maxar, Earthstar Geographics",
+}).addTo(map);
+const labels = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 21, maxNativeZoom: 19 },
+);
+L.control.zoom({ position: "bottomright" }).addTo(map);
+map.attributionControl.setPrefix(false);
+
+const listLayer = L.layerGroup().addTo(map);
+const shapeLayer = L.layerGroup();
+const handleLayer = L.layerGroup();
+
+/** Espacio que tapa el panel, para centrar la misión en la parte visible del mapa. */
+function fitPadding() {
+  if (window.innerWidth <= 760) return { paddingTopLeft: [24, 72], paddingBottomRight: [24, window.innerHeight * 0.52 + 32] };
+  return { paddingTopLeft: [$("panel").offsetWidth + 60, 80], paddingBottomRight: [80, 60] };
+}
+
+function fitTo(points, maxZoom = 19) {
+  if (points.length === 0) return;
+  if (points.length === 1) {
+    map.setView(points[0], Math.max(map.getZoom(), 17));
+    return;
+  }
+  map.fitBounds(L.latLngBounds(points), { ...fitPadding(), maxZoom });
+}
+
+function missionPoints(mission) {
+  if (mission.type === "map") return mission.boundary;
+  return OrbitPlanner.plan(mission)?.path ?? [];
+}
+
+function divIcon(className, size, html = "") {
+  return L.divIcon({ className: "", html: `<div class="${className}">${html}</div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+}
+
+function arrow(at, bearing) {
+  return L.marker(at, {
+    icon: L.divIcon({ className: "", html: `<div class="route-arrow" style="transform: rotate(${bearing}deg)"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] }),
+    interactive: false,
+    keyboard: false,
+  });
+}
+
+/** Dibuja una misión: el área en blanco, la ruta en azul y el inicio en verde, como en Dronelink. */
+function drawMission(mission, group, { faded = false, arrows = false, interactive = false } = {}) {
+  const layers = [];
+  const routeStyle = { color: ACCENT, weight: faded ? 2.5 : 3, opacity: faded ? 0.75 : 1, lineJoin: "round", interactive };
+  if (mission.type === "map") {
+    if (mission.boundary.length >= 2) {
+      layers.push(
+        L.polygon(mission.boundary, {
+          color: "#ffffff",
+          weight: 2.5,
+          opacity: faded ? 0.75 : 1,
+          fillColor: "#ffffff",
+          fillOpacity: faded ? 0.1 : 0.16,
+          interactive,
+        }),
+      );
+    }
+    const plan = MapPlanner.plan(mission);
+    if (plan.legs.length > MAX_LEGS) {
+      // Un área enorme (marcada con el mapa muy alejado) no se dibuja: serían miles de líneas.
+    } else if (plan.path.length) {
+      layers.push(L.polyline(plan.path, routeStyle));
+      if (arrows) {
+        for (const leg of plan.legs) {
+          const mid = [(leg.start[0] + leg.end[0]) / 2, (leg.start[1] + leg.end[1]) / 2];
+          layers.push(arrow(mid, Geo.bearing(leg.start, leg.end)));
+        }
+      }
+      layers.push(endMarker(plan.path.at(-1)));
+      layers.push(startMarker(plan.path[0], !faded));
+    }
+  } else {
+    const plan = OrbitPlanner.plan(mission);
+    if (plan) {
+      layers.push(L.polyline(plan.path, routeStyle));
+      if (arrows) {
+        const step = Math.max(1, Math.round(plan.path.length / (8 * mission.rotations)));
+        for (let i = step; i < plan.path.length - 1; i += step) layers.push(arrow(plan.path[i], Geo.bearing(plan.path[i], plan.path[i + 1])));
+      }
+      if (faded) layers.push(L.circleMarker(mission.center, { radius: 5, color: "#fff", weight: 2, fillColor: "#ffc107", fillOpacity: 1, interactive }));
+      layers.push(startMarker(plan.start, !faded));
+    }
+  }
+  layers.forEach((layer) => group.addLayer(layer));
+  return layers;
+}
+
+function endMarker(at) {
+  return L.marker(at, { icon: divIcon("end-dot", 12), interactive: false, keyboard: false });
+}
+
+function startMarker(at, label) {
+  return L.marker(at, {
+    icon: divIcon("start-dot", 16, label ? '<span class="start-label">Inicio</span>' : ""),
+    interactive: false,
+    keyboard: false,
+  });
+}
+
+// ---------- Lista ----------
+
+const relative = new Intl.RelativeTimeFormat("es", { numeric: "auto" });
+
+function whenText(time) {
+  const minutes = Math.round((time - Date.now()) / 60000);
+  if (minutes === 0) return "Editada hace un momento";
+  if (minutes > -60) return `Editada ${relative.format(minutes, "minute")}`;
+  const hours = Math.round(minutes / 60);
+  if (hours > -24) return `Editada ${relative.format(hours, "hour")}`;
+  return `Editada el ${new Date(time).toLocaleDateString("es", { day: "numeric", month: "short", year: "numeric" })}`;
+}
+
+function sortedMissions() {
+  return Object.values(state.missions).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function renderList() {
+  const missions = sortedMissions();
+  const list = $("mission-list");
+  list.replaceChildren();
+  listLayer.clearLayers();
+  $("list-empty").hidden = missions.length > 0;
+
+  for (const mission of missions) {
+    const card = document.createElement("div");
+    card.className = "mission-card";
+    card.innerHTML = `
+      <div class="type"><svg><use href="#i-${mission.type === "map" ? "grid" : "orbit"}" /></svg></div>
+      <div class="body"><div class="name"></div><div class="meta"></div><div class="when"></div></div>`;
+    card.querySelector(".name").textContent = mission.name;
+    card.querySelector(".meta").textContent = summary(mission);
+    card.querySelector(".when").textContent = whenText(mission.updatedAt);
+    card.addEventListener("click", () => openEditor(mission.id));
+    list.append(card);
+
+    const group = L.featureGroup().addTo(listLayer);
+    drawMission(mission, group, { faded: true, interactive: true });
+    group.bindTooltip(mission.name, { sticky: true, className: "mission-tooltip", direction: "top" });
+    group.on("click", () => openEditor(mission.id));
+    group.on("mouseover", () => card.classList.add("hover"));
+    group.on("mouseout", () => card.classList.remove("hover"));
+    card.addEventListener("mouseenter", () => group.eachLayer((l) => l.setStyle?.({ weight: 4 })));
+    card.addEventListener("mouseleave", () => group.eachLayer((l) => l.setStyle?.({ weight: 2.5 })));
+  }
+}
+
+function fitAll() {
+  const points = sortedMissions().flatMap(missionPoints);
+  if (points.length) fitTo(points, 17);
+}
+
+// ---------- Editor ----------
+
+function openEditor(id, mission = null) {
+  const source = mission ?? state.missions[id];
+  if (!source) return;
+  current = clone(source);
+  undoStack = [];
+  redoStack = [];
+  $("list-view").hidden = true;
+  $("editor-view").hidden = false;
+  $("edit-tools").hidden = false;
+  $("editor-name").value = current.name;
+  $("editor-type-icon").querySelector("use").setAttribute("href", `#i-${current.type === "map" ? "grid" : "orbit"}`);
+  map.removeLayer(listLayer);
+  shapeLayer.addTo(map);
+  handleLayer.addTo(map);
+  map.doubleClickZoom.disable();
+  history.replaceState(null, "", `#m/${current.id}`);
+  buildParams();
+  refresh();
+  if (geometry(current).length) fitTo(missionPoints(current));
+}
+
+function closeEditor() {
+  if (!current) return;
+  document.activeElement?.blur?.();
+  // Una misión nueva sin área ni centro no se guarda.
+  if (geometry(current).length === 0 && !state.shas[current.id] && state.missions[current.id]) {
+    delete state.missions[current.id];
+    delete state.dirty[current.id];
+    persist();
+  }
+  current = null;
+  shapeLayer.clearLayers();
+  handleLayer.clearLayers();
+  map.removeLayer(shapeLayer);
+  map.removeLayer(handleLayer);
+  listLayer.addTo(map);
+  map.doubleClickZoom.enable();
+  $("editor-view").hidden = true;
+  $("list-view").hidden = false;
+  $("edit-tools").hidden = true;
+  $("map-hint").hidden = true;
+  history.replaceState(null, "", location.pathname);
+  renderList();
+}
+
+/** Guarda la misión abierta (en este navegador y, en un momento, en GitHub). */
+function save() {
+  current.updatedAt = Date.now();
+  state.missions[current.id] = clone(current);
+  state.dirty[current.id] = true;
+  persist();
+  scheduleSync();
+}
+
+/** Guarda una copia para deshacer. */
+function remember(snapshot = clone(current)) {
+  undoStack.push(snapshot);
+  if (undoStack.length > 100) undoStack.shift();
+  redoStack = [];
+}
+
+function undo() {
+  if (!current || !undoStack.length) return;
+  redoStack.push(clone(current));
+  current = undoStack.pop();
+  afterHistoryJump();
+}
+
+function redo() {
+  if (!current || !redoStack.length) return;
+  undoStack.push(clone(current));
+  current = redoStack.pop();
+  afterHistoryJump();
+}
+
+function afterHistoryJump() {
+  $("editor-name").value = current.name;
+  save();
+  buildParams();
+  refresh();
+}
+
+/** Cambio de esquinas o centro: se puede deshacer y redibuja todo. */
+function editGeometry(change) {
+  remember();
+  change();
+  save();
+  refresh();
+}
+
+function refresh() {
+  redrawShapes();
+  drawHandles();
+  updateHint();
+}
+
+/** Redibuja el área y la ruta, y actualiza el resumen y las ayudas. Sirve también mientras se arrastra. */
+function redrawShapes() {
+  shapeLayer.clearLayers();
+  drawMission(current, shapeLayer, { arrows: true });
+  $("editor-summary").textContent = summary(current);
+  renderStats();
+  helpUpdaters.forEach((update) => update());
+  $("tool-undo").disabled = undoStack.length === 0;
+  $("tool-redo").disabled = redoStack.length === 0;
+  $("tool-clear").disabled = geometry(current).length === 0;
+}
+
+function distanceText(meters) {
+  return meters >= 1000 ? `${num(meters / 1000, 2)} km` : `${num(meters)} m`;
+}
+
+function renderStats() {
+  let stats;
+  if (current.type === "map") {
+    const plan = MapPlanner.plan(current);
+    stats = [
+      ["Duración", plan.legs.length ? formatDuration(plan.durationSeconds) : "—"],
+      ["Fotos", plan.legs.length ? String(plan.photoCount) : "—"],
+      ["Distancia", plan.legs.length ? distanceText(plan.lengthMeters) : "—"],
+      ["Área", plan.areaHectares ? `${num(plan.areaHectares, 2)} ha` : "—"],
+      ["GSD", `${num(plan.gsdCmPerPx, 2)} cm/px`],
+      ["Líneas", plan.legs.length ? String(plan.legs.length) : "—"],
+    ];
+  } else {
+    const plan = OrbitPlanner.plan(current);
+    stats = [
+      ["Duración", plan ? formatDuration(plan.durationSeconds) : "—"],
+      ["Distancia", plan ? distanceText(plan.lengthMeters) : "—"],
+      ["Fotos", plan && plan.photoCount ? String(plan.photoCount) : "—"],
+    ];
+  }
+  $("editor-stats").innerHTML = stats.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+}
+
+function updateHint() {
+  const hint = $("map-hint");
+  if (current.type === "map") {
+    const n = current.boundary.length;
+    hint.textContent =
+      MapPlanner.plan(current).legs.length > MAX_LEGS
+        ? "El área es demasiado grande para un vuelo: acércate en el mapa y márcala de nuevo"
+        : n === 0
+        ? "Haz clic en el mapa para marcar las esquinas del área"
+        : n < 3
+          ? "Sigue marcando esquinas: hacen falta al menos 3"
+          : "Arrastra una esquina para moverla · clic en ella para quitarla · arrastra un punto pequeño para agregar otra";
+  } else {
+    hint.textContent = current.center
+      ? "Arrastra el centro para moverlo, o el cuadrito azul para cambiar el radio"
+      : "Haz clic en el mapa para poner el centro de la órbita";
+  }
+  hint.hidden = false;
+}
+
+map.on("click", (event) => {
+  if (!current) return;
+  const point = toPoint(event.latlng);
+  editGeometry(() => {
+    if (current.type === "map") current.boundary = Geo.insertIntoPolygon(current.boundary, point);
+    else current.center = point;
+  });
+});
+
+function drawHandles() {
+  handleLayer.clearLayers();
+  if (current.type === "map") drawAreaHandles();
+  else if (current.center) drawOrbitHandles();
+}
+
+function drawAreaHandles() {
+  const points = current.boundary;
+  const midpoints = [];
+  const edgeCount = points.length >= 3 ? points.length : points.length - 1;
+  const midpointOf = (i) => {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  };
+
+  // Puntos pequeños a mitad de cada lado: al arrastrarlos se agrega una esquina.
+  for (let i = 0; i < edgeCount; i++) {
+    const marker = L.marker(midpointOf(i), { icon: divIcon("mid-handle", 12), draggable: true, zIndexOffset: 500, title: "Arrastra para agregar una esquina" });
+    let inserted = -1;
+    marker.on("dragstart", () => {
+      remember();
+      inserted = i + 1;
+      current.boundary.splice(inserted, 0, toPoint(marker.getLatLng()));
+    });
+    marker.on("drag", () => {
+      current.boundary[inserted] = toPoint(marker.getLatLng());
+      redrawShapes();
+    });
+    marker.on("dragend", () => {
+      save();
+      refresh();
+    });
+    marker.on("click", () => editGeometry(() => current.boundary.splice(i + 1, 0, midpointOf(i))));
+    midpoints.push(marker);
+    handleLayer.addLayer(marker);
+  }
+
+  points.forEach((point, i) => {
+    const marker = L.marker(point, { icon: divIcon("vertex-handle", 18), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
+    marker.on("dragstart", () => remember());
+    marker.on("drag", () => {
+      current.boundary[i] = toPoint(marker.getLatLng());
+      // Mueve los puntos medios de los dos lados que tocan esta esquina.
+      [i - 1 < 0 ? edgeCount - 1 : i - 1, i].forEach((edge) => {
+        if (midpoints[edge] && edge < edgeCount) midpoints[edge].setLatLng(midpointOf(edge));
+      });
+      redrawShapes();
+    });
+    marker.on("dragend", () => {
+      save();
+      refresh();
+    });
+    const removeVertex = () => editGeometry(() => current.boundary.splice(i, 1));
+    marker.on("click", removeVertex);
+    marker.on("contextmenu", removeVertex);
+    handleLayer.addLayer(marker);
+  });
+}
+
+function drawOrbitHandles() {
+  const radiusPoint = () => OrbitPlanner.plan({ ...current, finalRadius: null, rotations: 1 }).start;
+  const center = L.marker(current.center, { icon: divIcon("vertex-handle center", 18), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover el centro" });
+  const radius = L.marker(radiusPoint(), { icon: divIcon("radius-handle", 16), draggable: true, zIndexOffset: 1000, title: "Arrastra para cambiar el radio" });
+
+  center.on("dragstart", () => remember());
+  center.on("drag", () => {
+    current.center = toPoint(center.getLatLng());
+    radius.setLatLng(radiusPoint());
+    redrawShapes();
+  });
+  center.on("dragend", () => {
+    save();
+    refresh();
+  });
+
+  radius.on("dragstart", () => remember());
+  radius.on("drag", () => {
+    const meters = Geo.distance(current.center, toPoint(radius.getLatLng()));
+    current.radius = Math.min(500, Math.max(5, Math.round(meters)));
+    fieldSetters.radius?.(current.radius);
+    redrawShapes();
+  });
+  radius.on("dragend", () => {
+    save();
+    refresh();
+  });
+
+  handleLayer.addLayer(center);
+  handleLayer.addLayer(radius);
+}
+
+// ---------- Parámetros ----------
+
+const helpUpdaters = [];
+const fieldSetters = {};
+const fmt = (value, decimals) => value.toLocaleString("es", { maximumFractionDigits: decimals, useGrouping: false });
+const parse = (text) => {
+  const value = Number(String(text).trim().replace(",", "."));
+  return text.trim() === "" || !Number.isFinite(value) ? null : value;
+};
+
+function buildParams() {
+  const params = $("editor-params");
+  params.replaceChildren();
+  helpUpdaters.length = 0;
+  for (const key of Object.keys(fieldSetters)) delete fieldSetters[key];
+  if (current.type === "map") buildMapParams(params);
+  else buildOrbitParams(params);
+}
+
+function section(params, title) {
+  const el = document.createElement("div");
+  el.className = "section-title";
+  el.textContent = title;
+  params.append(el);
+}
+
+/**
+ * Un parámetro numérico. Se aplica mientras se escribe si está dentro de los límites; si no,
+ * se avisa en amarillo y al salir del campo se corrige. Con `optional`, vacío vale null.
+ */
+function numberParam(params, { key, label, unit = "", min, max, step = 1, decimals = 0, slider = false, optional = false, placeholder = "", help }) {
+  const el = document.createElement("div");
+  el.className = "param";
+  el.innerHTML = `
+    <div class="param-head">
+      <label></label>
+      <div class="value-box"><input inputmode="decimal" autocomplete="off" /><span class="unit"></span></div>
+    </div>
+    ${slider ? `<input type="range" min="${min}" max="${max}" step="${step}" />` : ""}
+    <div class="help"></div>`;
+  const id = `param-${key}`;
+  const input = el.querySelector(".value-box input");
+  const box = el.querySelector(".value-box");
+  const range = el.querySelector('input[type="range"]');
+  const helpEl = el.querySelector(".help");
+  el.querySelector("label").textContent = label;
+  el.querySelector("label").htmlFor = id;
+  input.id = id;
+  input.placeholder = placeholder;
+  el.querySelector(".unit").textContent = unit;
+
+  let error = null;
+  let snapshot = null;
+  const show = (value) => {
+    input.value = value === null || value === undefined ? "" : fmt(value, decimals);
+    if (range) range.value = value ?? min;
+  };
+  const showHelp = () => {
+    const text = error ?? help?.() ?? "";
+    helpEl.textContent = text;
+    helpEl.hidden = !text;
+    helpEl.classList.toggle("warn", Boolean(error));
+    box.classList.toggle("invalid", Boolean(error));
+  };
+  const begin = () => {
+    snapshot ??= clone(current);
+  };
+  const commit = () => {
+    if (snapshot && JSON.stringify(snapshot[key]) !== JSON.stringify(current[key])) remember(snapshot);
+    snapshot = null;
+    save();
+    redrawShapes();
+  };
+  const apply = (value) => {
+    current[key] = value;
+    redrawShapes();
+  };
+
+  show(current[key]);
+  fieldSetters[key] = show;
+  helpUpdaters.push(showHelp);
+
+  input.addEventListener("focus", begin);
+  input.addEventListener("input", () => {
+    begin();
+    const value = parse(input.value);
+    if (value === null && optional && input.value.trim() === "") {
+      error = null;
+      apply(null);
+    } else if (value !== null && value >= min && value <= max) {
+      error = null;
+      if (range) range.value = value;
+      apply(value);
+    } else {
+      error = `Escoge entre ${fmt(min, decimals)} y ${fmt(max, decimals)} ${unit}`.trim();
+      showHelp();
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (error) {
+      const value = parse(input.value);
+      const fixed = value === null ? current[key] : Math.min(max, Math.max(min, value));
+      error = null;
+      show(fixed);
+      current[key] = fixed;
+    } else {
+      show(current[key]);
+    }
+    commit();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") input.blur();
+    if (event.key === "Escape") {
+      if (snapshot) current[key] = snapshot[key];
+      error = null;
+      show(current[key]);
+      snapshot = null;
+      input.blur();
+      event.stopPropagation();
+    }
+  });
+  range?.addEventListener("pointerdown", begin);
+  range?.addEventListener("focus", begin);
+  range?.addEventListener("input", () => {
+    begin();
+    const value = Number(range.value);
+    input.value = fmt(value, decimals);
+    error = null;
+    apply(value);
+  });
+  range?.addEventListener("change", commit);
+  params.append(el);
+  return { show };
+}
+
+function choiceParam(params, { key, label, options }) {
+  const el = document.createElement("div");
+  el.className = "param";
+  el.innerHTML = `<div class="label"></div><div class="segmented"></div>`;
+  el.querySelector(".label").textContent = label;
+  const segmented = el.querySelector(".segmented");
+  const buttons = options.map(([value, text]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.classList.toggle("selected", current[key] === value);
+    button.addEventListener("click", () => {
+      if (current[key] === value) return;
+      remember();
+      current[key] = value;
+      buttons.forEach((b) => b.classList.toggle("selected", b === button));
+      save();
+      redrawShapes();
+    });
+    segmented.append(button);
+    return button;
+  });
+  params.append(el);
+}
+
+function buttonParam(params, label, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button outline small wide param-button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  params.append(button);
+}
+
+function buildMapParams(params) {
+  const plan = () => MapPlanner.plan(current);
+
+  section(params, "VUELO");
+  numberParam(params, {
+    key: "altitude",
+    label: "Altura",
+    unit: "m",
+    min: 5,
+    max: 120,
+    slider: true,
+    help: () => {
+      const [w, h] = MapPlanner.footprint({ sensorWidthMm: 9.65, sensorHeightMm: 7.24, focalLengthMm: 6.72 }, current.altitude);
+      return `GSD ${num(plan().gsdCmPerPx, 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`;
+    },
+  });
+  numberParam(params, {
+    key: "maxSpeed",
+    label: "Velocidad máxima",
+    unit: "m/s",
+    min: 1,
+    max: 15,
+    step: 0.1,
+    decimals: 1,
+    help: () => {
+      const speed = plan().speed;
+      const limited = speed < current.maxSpeed - 0.05;
+      return `Volará a ${num(speed, 1)} m/s (${num(speed * 3.6)} km/h)${limited ? " por el tiempo entre fotos" : ""}`;
+    },
+  });
+  choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
+
+  section(params, "CÁMARA");
+  numberParam(params, {
+    key: "frontOverlap",
+    label: "Traslape frontal",
+    unit: "%",
+    min: 10,
+    max: 95,
+    slider: true,
+    help: () => `Una foto cada ${num(plan().photoSpacing, 1)} m`,
+  });
+  numberParam(params, {
+    key: "sideOverlap",
+    label: "Traslape lateral",
+    unit: "%",
+    min: 10,
+    max: 95,
+    slider: true,
+    help: () => `Líneas separadas ${num(plan().lineSpacing, 1)} m`,
+  });
+  numberParam(params, {
+    key: "minPhotoInterval",
+    label: "Tiempo mínimo entre fotos",
+    unit: "s",
+    min: 1,
+    max: 10,
+    step: 0.5,
+    decimals: 1,
+    help: () => "Lo más rápido que la cámara guarda cada foto",
+  });
+  numberParam(params, {
+    key: "gimbalPitch",
+    label: "Inclinación del gimbal",
+    unit: "°",
+    min: -90,
+    max: 0,
+    slider: true,
+    help: () => "-90° = mirando hacia abajo",
+  });
+
+  section(params, "CUADRÍCULA");
+  const direction = numberParam(params, {
+    key: "direction",
+    label: "Dirección de las líneas",
+    unit: "°",
+    min: 0,
+    max: 359,
+    slider: true,
+    help: () => "0° = norte-sur · 90° = este-oeste",
+  });
+  const setDirection = (value) => {
+    remember();
+    current.direction = value;
+    direction.show(value);
+    save();
+    redrawShapes();
+  };
+  buttonParam(params, "Alinear con el lado más largo", () => {
+    const best = MapPlanner.longestEdgeDirection(current.boundary);
+    if (best === null) toast("Primero marca el área en el mapa");
+    else setDirection(best);
+  });
+  buttonParam(params, "Girar 90°", () => setDirection((Math.round(current.direction) + 90) % 360));
+}
+
+function buildOrbitParams(params) {
+  section(params, "ÓRBITA");
+  numberParam(params, { key: "radius", label: "Radio", unit: "m", min: 5, max: 500, slider: true });
+  numberParam(params, { key: "altitude", label: "Altura", unit: "m", min: 5, max: 120, slider: true });
+  choiceParam(params, {
+    key: "clockwise",
+    label: "Sentido",
+    options: [
+      [true, "Horario"],
+      [false, "Antihorario"],
+    ],
+  });
+  numberParam(params, { key: "rotations", label: "Vueltas", min: 0.25, max: 10, step: 0.25, decimals: 2 });
+  numberParam(params, {
+    key: "speed",
+    label: "Velocidad",
+    unit: "m/s",
+    min: 1,
+    max: 12,
+    step: 0.1,
+    decimals: 1,
+    help: () => `${num(current.speed * 3.6)} km/h · ${num(OrbitPlanner.angularSpeed(current.radius, current.speed), 1)}° por segundo`,
+  });
+  choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
+
+  section(params, "ESPIRAL (OPCIONAL)");
+  numberParam(params, { key: "finalAltitude", label: "Altura final", unit: "m", min: 5, max: 120, optional: true, placeholder: "Igual" });
+  numberParam(params, { key: "finalRadius", label: "Radio final", unit: "m", min: 5, max: 500, optional: true, placeholder: "Igual" });
+
+  section(params, "CÁMARA");
+  numberParam(params, {
+    key: "gimbalPitch",
+    label: "Inclinación del gimbal",
+    unit: "°",
+    min: -90,
+    max: 30,
+    slider: true,
+    help: () => "0° = al horizonte · -90° = hacia abajo",
+  });
+  numberParam(params, {
+    key: "photoInterval",
+    label: "Foto cada",
+    unit: "s",
+    min: 1,
+    max: 60,
+    step: 0.5,
+    decimals: 1,
+    optional: true,
+    placeholder: "Sin fotos",
+    help: () => (current.photoInterval ? `Unas ${OrbitPlanner.plan(current)?.photoCount ?? 0} fotos` : "Déjalo vacío para no tomar fotos"),
+  });
+}
+
+// ---------- Crear, importar y borrar ----------
+
+function nextName(type) {
+  const base = type === "map" ? "Mapa" : "Órbita";
+  const count = Object.values(state.missions).filter((m) => m.type === type).length;
+  return `${base} ${count + 1}`;
+}
+
+$("new-map").addEventListener("click", () => {
+  const mission = newMapMission(nextName("map"));
+  openEditor(mission.id, mission);
+});
+
+$("new-orbit").addEventListener("click", () => {
+  const mission = newOrbitMission(nextName("orbit"));
+  openEditor(mission.id, mission);
+});
+
+$("import-kml").addEventListener("click", () => $("kml-file").click());
+$("kml-file").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    const text = await readKml(file);
+    const result = text && parseKml(text);
+    if (!result) {
+      toast("Ese archivo no tiene un área (polígono) que se pueda usar", true);
+      return;
+    }
+    const mission = newMapMission(result.name || file.name.replace(/\.km[lz]$/i, ""), result.points);
+    mission.direction = MapPlanner.longestEdgeDirection(mission.boundary) ?? 0;
+    state.missions[mission.id] = mission;
+    state.dirty[mission.id] = true;
+    persist();
+    scheduleSync();
+    openEditor(mission.id);
+    toast(`Área importada: ${mission.boundary.length} esquinas`);
+  } catch (error) {
+    toast(`No se pudo leer el archivo: ${error.message}`, true);
+  }
+});
+
+/** Un KMZ es un ZIP con el KML adentro; JSZip se carga solo cuando hace falta. */
+async function readKml(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) return new TextDecoder().decode(bytes);
+  if (!window.JSZip) {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+      script.onload = resolve;
+      script.onerror = () => reject(new Error("no se pudo cargar el lector de KMZ"));
+      document.head.append(script);
+    });
+  }
+  const zip = await window.JSZip.loadAsync(bytes);
+  const entry = Object.values(zip.files).find((f) => f.name.toLowerCase().endsWith(".kml"));
+  return entry ? entry.async("string") : null;
+}
+
+$("editor-delete").addEventListener("click", () => {
+  if (!current || !confirm(`¿Borrar «${current.name}»? También se borra del teléfono.`)) return;
+  const id = current.id;
+  if (state.shas[id]) state.deleted[id] = current.name;
+  delete state.missions[id];
+  delete state.dirty[id];
+  persist();
+  current = { ...current, boundary: [], center: null }; // Para que closeEditor no la vuelva a guardar.
+  closeEditor();
+  scheduleSync();
+});
+
+$("editor-name").addEventListener("input", (event) => {
+  const name = event.target.value.trim();
+  if (!current || !name) return;
+  current.name = name;
+  save();
+  $("editor-summary").textContent = summary(current);
+});
+$("editor-name").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") event.target.blur();
+});
+$("editor-back").addEventListener("click", closeEditor);
+$("editor-done").addEventListener("click", closeEditor);
+
+// ---------- Herramientas del mapa ----------
+
+$("tool-undo").addEventListener("click", undo);
+$("tool-redo").addEventListener("click", redo);
+$("tool-clear").addEventListener("click", () => {
+  if (!current || geometry(current).length === 0) return;
+  editGeometry(() => {
+    if (current.type === "map") current.boundary = [];
+    else current.center = null;
+  });
+});
+$("tool-fit").addEventListener("click", () => (current ? fitTo(missionPoints(current)) : fitAll()));
+$("tool-locate").addEventListener("click", () => {
+  if (!navigator.geolocation) return toast("Este navegador no da la ubicación", true);
+  navigator.geolocation.getCurrentPosition(
+    (position) => map.setView([position.coords.latitude, position.coords.longitude], 18),
+    () => toast("No se pudo obtener tu ubicación", true),
+    { enableHighAccuracy: true, timeout: 10000 },
+  );
+});
+
+function setLabels(on) {
+  if (on) labels.addTo(map);
+  else map.removeLayer(labels);
+  $("tool-labels").classList.toggle("active", on);
+  storage.set(LABELS_KEY, on ? "1" : "0");
+}
+$("tool-labels").addEventListener("click", () => setLabels(!map.hasLayer(labels)));
+setLabels(storage.get(LABELS_KEY) !== "0");
+
+document.addEventListener("keydown", (event) => {
+  const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
+  const mod = event.ctrlKey || event.metaKey;
+  if (mod && !typing && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redo();
+    else undo();
+  } else if (mod && !typing && event.key.toLowerCase() === "y") {
+    event.preventDefault();
+    redo();
+  } else if (event.key === "Escape" && !typing && current && !$("sync-dialog").open) {
+    closeEditor();
+  }
+});
+
+// ---------- Buscar lugares ----------
+
+let searchTimer = null;
+let searchResults = [];
+const searchInput = $("search-input");
+const resultsBox = $("search-results");
+
+function showResults(results) {
+  searchResults = results;
+  resultsBox.replaceChildren(
+    ...results.map((result) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = result.label;
+      button.addEventListener("click", () => goToResult(result));
+      return button;
+    }),
+  );
+  resultsBox.hidden = results.length === 0;
+}
+
+function goToResult(result) {
+  resultsBox.hidden = true;
+  searchInput.blur();
+  if (result.bounds) map.fitBounds(result.bounds, { ...fitPadding(), maxZoom: 18 });
+  else map.setView(result.center, 18);
+}
+
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const query = searchInput.value.trim();
+  if (query.length < 3) return showResults([]);
+  const coords = query.match(/^(-?\d+(?:[.,]\d+)?)\s*[,;\s]\s*(-?\d+(?:[.,]\d+)?)$/);
+  if (coords) {
+    const lat = Number(coords[1].replace(",", "."));
+    const lon = Number(coords[2].replace(",", "."));
+    if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return showResults([{ label: `Ir a ${lat}, ${lon}`, center: [lat, lon] }]);
+  }
+  searchTimer = setTimeout(async () => {
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=es&q=${encodeURIComponent(query)}`;
+      const results = await (await fetch(url)).json();
+      if (searchInput.value.trim() !== query) return;
+      showResults(
+        results.map((r) => ({
+          label: r.display_name,
+          center: [Number(r.lat), Number(r.lon)],
+          bounds: r.boundingbox && [
+            [Number(r.boundingbox[0]), Number(r.boundingbox[2])],
+            [Number(r.boundingbox[1]), Number(r.boundingbox[3])],
+          ],
+        })),
+      );
+    } catch {
+      showResults([]);
+    }
+  }, 450);
+});
+searchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && searchResults[0]) goToResult(searchResults[0]);
+  if (event.key === "Escape") {
+    searchInput.value = "";
+    showResults([]);
+    searchInput.blur();
+  }
+});
+document.addEventListener("click", (event) => {
+  if (!$("map-search").contains(event.target)) resultsBox.hidden = true;
+});
+
+// ---------- Avisos ----------
+
+let toastTimer = null;
+function toast(message, error = false) {
+  const el = $("toast");
+  el.textContent = message;
+  el.classList.toggle("error", error);
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), error ? 5000 : 2500);
+}
+
+// ---------- Sincronización ----------
+
+let syncTimer = null;
+let syncing = false;
+let syncAgain = false;
+let lastSync = 0;
+let lastError = "";
+
+function setChip(kind, label) {
+  const chip = $("sync-chip");
+  chip.dataset.state = kind;
+  chip.querySelector(".label").textContent = label;
+  chip.title = kind === "error" ? lastError : "Sincronización con el teléfono";
+}
+
+function scheduleSync(delay = 1500) {
+  if (!token) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, delay);
+}
+
+async function runSync() {
+  if (!token) return setChip("off", "Conectar teléfono");
+  if (syncing) {
+    syncAgain = true;
+    return;
+  }
+  syncing = true;
+  setChip("busy", "Sincronizando…");
+  try {
+    await syncAll(new GitHubSync(token), state);
+    persist();
+    lastSync = Date.now();
+    lastError = "";
+    setChip("ok", "Sincronizado");
+    if (!current) {
+      renderList();
+    } else {
+      const latest = state.missions[current.id];
+      if (latest && latest.updatedAt > current.updatedAt) {
+        // La misión abierta cambió en el teléfono.
+        current = clone(latest);
+        undoStack = [];
+        redoStack = [];
+        $("editor-name").value = current.name;
+        buildParams();
+        refresh();
+        toast("La misión se actualizó con cambios del teléfono");
+      }
+    }
+  } catch (error) {
+    lastError = error.message;
+    setChip("error", error.offline ? "Sin conexión" : "Error al sincronizar");
+    if (error.status === 401 || error.status === 403 || error.status === 404) toast(error.message, true);
+  } finally {
+    syncing = false;
+    if (syncAgain) {
+      syncAgain = false;
+      scheduleSync(300);
+    }
+  }
+}
+
+const dialog = $("sync-dialog");
+$("token-link").href = TOKEN_HELP_URL;
+$("sync-chip").addEventListener("click", () => {
+  $("token-input").value = token;
+  $("token-remove").hidden = !token;
+  $("sync-error").hidden = !lastError;
+  $("sync-error").textContent = lastError;
+  dialog.showModal();
+});
+$("token-save").addEventListener("click", async () => {
+  const candidate = $("token-input").value.trim();
+  if (!candidate) return;
+  const button = $("token-save");
+  button.disabled = true;
+  button.textContent = "Probando…";
+  try {
+    await new GitHubSync(candidate).check();
+    token = candidate;
+    storage.set(TOKEN_KEY, token);
+    dialog.close();
+    toast("Conectado. Las misiones se sincronizan con el teléfono.");
+    runSync();
+  } catch (error) {
+    $("sync-error").textContent = error.message;
+    $("sync-error").hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Conectar";
+  }
+});
+$("token-remove").addEventListener("click", () => {
+  token = "";
+  storage.set(TOKEN_KEY, null);
+  lastError = "";
+  dialog.close();
+  setChip("off", "Conectar teléfono");
+});
+
+// Trae los cambios del teléfono al volver a esta pestaña y cada minuto.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Date.now() - lastSync > 15000) scheduleSync(0);
+});
+setInterval(() => {
+  if (document.visibilityState === "visible") scheduleSync(0);
+}, 60000);
+
+// ---------- Inicio ----------
+
+renderList();
+const fromHash = location.hash.match(/^#m\/(.+)$/)?.[1];
+if (fromHash && state.missions[fromHash]) {
+  map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+  openEditor(fromHash);
+} else if (Object.keys(state.missions).length) {
+  map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+  fitAll();
+} else {
+  map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+}
+if (token) runSync();
+else setChip("off", "Conectar teléfono");
