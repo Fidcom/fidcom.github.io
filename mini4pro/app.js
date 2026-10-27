@@ -45,8 +45,8 @@ import {
   projection,
   summary,
   takeoffOf,
-} from "./planner.js?v=20261027b";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261027b";
+} from "./planner.js?v=20261027d";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261027d";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -1196,7 +1196,7 @@ $("comp-duplicate").addEventListener("click", () => {
   const copy = copyComponent(component);
   if (copy.name) copy.name = `${copy.name} (copia)`;
   changePlan(() => current.components.splice(current.components.indexOf(component) + 1, 0, copy), copy.id);
-  toast("Duplicado: arrastra su centro para moverlo");
+  toast("Duplicado al lado: arrastra su centro para moverlo");
 });
 
 $("comp-delete").addEventListener("click", () => {

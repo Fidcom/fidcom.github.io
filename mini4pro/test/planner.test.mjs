@@ -9,6 +9,7 @@ import {
   MINI_4_PRO_12MP,
   OrbitPlanner,
   PlanPlanner,
+  copyComponent,
   newMapComponent,
   newOrbitComponent,
   newPlan,
@@ -264,4 +265,20 @@ test("KML: lee el polígono y quita el punto repetido", () => {
 
 test("KML sin área no sirve", () => {
   assert.equal(parseKml("<kml><Placemark><Point><coordinates>-65.8,18.1</coordinates></Point></Placemark></kml>"), null);
+});
+
+test("un duplicado va al lado del original, no encima", () => {
+  // El cuadrado mide 100 m de ancho: la copia queda 110 m al este, sin tocarlo.
+  const map = { ...newMapComponent(square), start: square[2] };
+  const copy = copyComponent(map);
+  assert.notEqual(copy.id, map.id);
+  assert.ok(Math.abs(Geo.area(copy.boundary) - Geo.area(square)) < 1);
+  const shift = pr.toLocal(Geo.centroid(copy.boundary)).x - pr.toLocal(Geo.centroid(square)).x;
+  assert.ok(Math.abs(shift - 110) < 0.5, `movido ${shift} m`);
+  assert.ok(Math.abs(Geo.distance(square[2], copy.start) - 110) < 0.5);
+  assert.deepEqual(map.boundary, square);
+
+  const orbit = { ...newOrbitComponent(origin), radius: 30 };
+  assert.ok(Math.abs(Geo.distance(origin, copyComponent(orbit).center) - 70) < 0.5);
+  assert.equal(copyComponent(newOrbitComponent()).center, null);
 });
