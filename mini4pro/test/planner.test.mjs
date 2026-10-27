@@ -26,6 +26,7 @@ import {
   newWaypointsComponent,
   normalizePlan,
   importKml,
+  FlightPreview,
   exportKml,
   planPoints,
   projection,
@@ -678,4 +679,47 @@ test("terreno: qué componentes lo siguen y cómo se guarda", () => {
   assert.equal(bare.components[0].terrainFollow, false);
   assert.ok(!TerrainFollow.needed(bare));
   assert.ok(!TerrainFollow.needed(newPlan("x", [{ ...components[0], enabled: false }])));
+});
+
+// ---- Vista previa ----
+
+test("vista previa: el vuelo dura lo mismo que el estimado y pasa por cada componente", () => {
+  const plan = newPlan("Todo", [
+    map({ altitude: 40 }),
+    { ...newOrbitComponent(geo(300, 300)), finalAltitude: 60 },
+    newWaypointsComponent([newWaypoint(geo(-50, 0), 30), newWaypoint(geo(-80, 40), 45)]),
+    { ...newPanoComponent(geo(0, -80)), panoType: "sphere" },
+  ]);
+  const result = PlanPlanner.plan(plan);
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, result.durationSeconds, 1e-6);
+  // Empieza en el despegue, en tierra, y termina ahí (regresa a casa).
+  const start = FlightPreview.at(timeline, 0);
+  assert.deepEqual(start.position, result.takeoff);
+  assert.equal(start.altitude, 0);
+  const end = FlightPreview.at(timeline, timeline.duration);
+  near(Geo.distance(end.position, result.takeoff), 0, 0.01);
+  near(end.altitude, 0, 1e-9);
+  assert.equal(end.photos, result.photoCount);
+  // Pasa por cada componente en orden, a su altura.
+  const labels = [...new Set(timeline.segments.filter((s) => s.kind !== "transit").map((s) => s.label))];
+  assert.deepEqual(labels, ["1. Mapa", "2. Órbita", "3. Waypoints", "4. Panorama"]);
+  const inMap = timeline.segments.find((s) => s.label === "1. Mapa");
+  assert.equal(FlightPreview.at(timeline, (inMap.t0 + inMap.t1) / 2).altitude, 40);
+  const orbit = timeline.segments.filter((s) => s.label === "2. Órbita");
+  near(orbit.at(-1).to.altitude, 60, 1e-9);
+  // En la órbita mira al centro.
+  const mid = FlightPreview.at(timeline, (orbit[5].t0 + orbit[5].t1) / 2);
+  near(mid.heading, Geo.bearing(mid.position, geo(300, 300)), 1e-6);
+  // La panorámica da la vuelta quieta.
+  const pano = timeline.segments.find((s) => s.kind === "shot");
+  near(Geo.distance(FlightPreview.at(timeline, pano.t0).position, FlightPreview.at(timeline, pano.t1 - 0.01).position), 0, 1e-6);
+  assert.equal(pano.turn, 360);
+  // Las fotos nunca bajan.
+  let last = 0;
+  for (let t = 0; t <= timeline.duration; t += timeline.duration / 500) {
+    const state = FlightPreview.at(timeline, t);
+    assert.ok(state.photos >= last);
+    last = state.photos;
+  }
 });

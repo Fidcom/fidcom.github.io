@@ -1618,6 +1618,178 @@ button {
   flex: 1;
 }
 
+/* ---------- Vista previa del vuelo ---------- */
+
+.preview-button {
+  margin: 4px 0 6px;
+}
+
+.preview-bar {
+  position: fixed;
+  bottom: 24px;
+  left: calc(50% + var(--panel-width) / 2);
+  transform: translateX(-50%);
+  z-index: 1000;
+  width: min(620px, calc(100vw - var(--panel-width) - 64px));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 12px;
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--stroke);
+  border-radius: 18px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.preview-play {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  transition: background 0.15s;
+}
+
+.preview-play:hover {
+  background: #4aa9ff;
+}
+
+.preview-play svg {
+  width: 24px;
+  height: 24px;
+}
+
+.preview-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.preview-info {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.preview-label {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-stats {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-main input[type="range"] {
+  display: block;
+  width: 100%;
+  margin: 6px 0 2px;
+  accent-color: var(--accent);
+}
+
+.preview-times {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-speed {
+  flex: none;
+  margin-top: 0;
+}
+
+.preview-speed button {
+  flex: none;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* El dron: una flecha que apunta a donde va, con el abanico de lo que ve la cámara. */
+.preview-drone {
+  width: 120px;
+  height: 120px;
+  position: relative;
+  transform: rotate(var(--heading, 0deg));
+  pointer-events: none;
+}
+
+.preview-drone .cone {
+  position: absolute;
+  inset: 0;
+  width: 120px;
+  height: 120px;
+  fill: rgba(255, 255, 255, 0.22);
+  stroke: rgba(255, 255, 255, 0.55);
+  stroke-width: 1;
+}
+
+.preview-drone.down .cone {
+  display: none;
+}
+
+.preview-drone .body {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  display: grid;
+  place-items: center;
+}
+
+.preview-drone .body svg {
+  width: 16px;
+  height: 16px;
+  fill: #fff;
+}
+
+@media (max-width: 760px) {
+  /* En el teléfono la vista previa ocupa la pantalla: el panel vuelve al cerrarla. */
+  body.previewing #panel {
+    display: none;
+  }
+
+  .preview-bar {
+    left: 8px;
+    right: 8px;
+    transform: none;
+    width: auto;
+    bottom: 8px;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+  }
+
+  .preview-main {
+    flex-basis: calc(100% - 110px);
+  }
+
+  .preview-speed {
+    order: 3;
+    margin-left: 54px;
+  }
+}
+
 /* ---------- Pantallas pequeñas ---------- */
 
 @media (max-width: 760px) {

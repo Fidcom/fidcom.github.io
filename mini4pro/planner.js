@@ -1516,6 +1516,114 @@ export function summary(plan) {
 
 export { num };
 
+// ---- Vista previa ----
+
+/**
+ * El vuelo de la misión en el tiempo, para la vista previa animada: tramos con su principio y su
+ * fin (posición y altura sobre el despegue), que suman el mismo tiempo que el estimado.
+ */
+export const FlightPreview = {
+  timeline(plan) {
+    const result = PlanPlanner.plan(plan);
+    const segments = [];
+    let time = 0;
+    const push = (from, to, seconds, info) => {
+      if (!(seconds > 0)) return;
+      segments.push({ t0: time, t1: time + seconds, from, to, ...info });
+      time += seconds;
+    };
+    // Como los tránsitos del piloto automático: sube donde está, va en línea recta y baja al llegar.
+    const transit = (from, to, label) => {
+      const cruise = Math.max(from.altitude, to.altitude);
+      const info = { label, kind: "transit", photos: [photos, photos] };
+      push(from, { ...from, altitude: cruise }, (cruise - from.altitude) / VERTICAL_SPEED, info);
+      push({ ...from, altitude: cruise }, { ...to, altitude: cruise }, Geo.distance(from.position, to.position) / plan.transitSpeed, info);
+      push({ ...to, altitude: cruise }, to, (cruise - to.altitude) / VERTICAL_SPEED, info);
+    };
+
+    let here = result.takeoff ? { position: result.takeoff, altitude: 0 } : null;
+    let photos = 0;
+    for (const item of result.items) {
+      const { component, result: route } = item;
+      if (!component.enabled || !route) continue;
+      const label = `${item.number}. ${componentName(component)}`;
+      const altitudes = routeAltitudes(component, route.path);
+      const points = route.path.map((position, i) => ({ position, altitude: altitudes[i] }));
+      if (here) transit(here, points[0], `Hacia ${label}`);
+      const info = { label, kind: "route", component };
+      if (points.length === 1) {
+        // Una foto o una panorámica: quieto en el punto (la panorámica da la vuelta).
+        push(points[0], points[0], route.durationSeconds, { ...info, kind: "shot", photos: [photos, photos + route.photoCount] });
+      } else {
+        const lengths = points.slice(1).map((p, i) => Geo.distance(points[i].position, p.position));
+        const total = lengths.reduce((a, b) => a + b, 0);
+        let walked = 0;
+        lengths.forEach((length, i) => {
+          const share = total > 0 ? length / total : 1 / lengths.length;
+          const p0 = photos + (route.photoCount * walked) / (total || 1);
+          walked += length;
+          const p1 = photos + (route.photoCount * walked) / (total || 1);
+          push(points[i], points[i + 1], route.durationSeconds * share, { ...info, photos: [p0, p1] });
+        });
+      }
+      photos += route.photoCount;
+      here = points.at(-1);
+    }
+    if (here && result.home) {
+      const home = { position: result.takeoff, altitude: here.altitude };
+      const info = { label: "Regreso al despegue", kind: "transit", photos: [photos, photos] };
+      push(here, home, Geo.distance(here.position, home.position) / plan.transitSpeed, info);
+      push(home, { ...home, altitude: 0 }, home.altitude / VERTICAL_SPEED, { ...info, label: "Aterrizando" });
+    } else if (here && result.landingSeconds > 0) {
+      push(here, { ...here, altitude: 0 }, result.landingSeconds, { label: "Aterrizando", kind: "transit", photos: [photos, photos] });
+    }
+
+    // Hacia dónde mira en cada tramo: hacia donde va o, quieto, como venía.
+    let heading = 0;
+    for (const segment of segments) {
+      const c = segment.component;
+      if (segment.kind === "shot") heading = c.type === "photo" || c.type === "pano" ? c.heading : heading;
+      else if (Geo.distance(segment.from.position, segment.to.position) > 0.5) heading = Geo.bearing(segment.from.position, segment.to.position);
+      segment.heading = heading;
+      // La panorámica (sin ser angular o vertical) gira entera.
+      segment.turn = segment.kind === "shot" && c.type === "pano" && c.panoType !== "vertical" ? 360 : 0;
+    }
+    return { duration: time, segments, photoCount: result.photoCount, takeoff: result.takeoff };
+  },
+
+  /** Dónde está el dron a los `time` segundos: posición, altura, rumbo, qué hace y cuántas fotos lleva. */
+  at(timeline, time) {
+    const { segments } = timeline;
+    if (!segments.length) return null;
+    const t = Math.min(Math.max(0, time), timeline.duration);
+    let lo = 0;
+    let hi = segments.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (segments[mid].t1 <= t) lo = mid + 1;
+      else hi = mid;
+    }
+    const segment = segments[lo];
+    const f = Math.min(1, Math.max(0, (t - segment.t0) / (segment.t1 - segment.t0)));
+    const lerp = (a, b) => a + (b - a) * f;
+    let heading = segment.heading + segment.turn * f;
+    // En una órbita que mira al centro, hacia el centro.
+    const c = segment.component;
+    const position = [lerp(segment.from.position[0], segment.to.position[0]), lerp(segment.from.position[1], segment.to.position[1])];
+    if (c?.type === "orbit" && c.heading === "center" && c.center) heading = Geo.bearing(position, c.center);
+    return {
+      index: lo,
+      position,
+      altitude: lerp(segment.from.altitude, segment.to.altitude),
+      heading: ((heading % 360) + 360) % 360,
+      label: segment.label,
+      kind: segment.kind,
+      component: c ?? null,
+      photos: Math.floor(lerp(segment.photos[0], segment.photos[1]) + 1e-9),
+    };
+  },
+};
+
 // ---- KML y KMZ ----
 
 const KML_DEFAULT_ALTITUDE = 30;
@@ -1707,7 +1815,7 @@ export function exportKml(plan, ground = null) {
   }
   if (result.home && previous && result.takeoff) {
     const home = { position: result.takeoff, altitude: base };
-    placemark("route", "Regreso a casa", "transit", line([previous, { ...home, altitude: previous.altitude }, home], false));
+    placemark("route", "Regreso al despegue", "transit", line([previous, { ...home, altitude: previous.altitude }, home], false));
   }
   if (result.takeoff) placemark("points", "Despegue", "takeoff", `<Point><coordinates>${kmlCoords([{ position: result.takeoff, altitude: 0 }])}</coordinates></Point>`);
 

@@ -55,6 +55,7 @@ import {
   normalizePlan,
   num,
   importKml as readKmlText,
+  FlightPreview,
   exportKml,
   planPoints,
   componentPoints,
@@ -65,9 +66,9 @@ import {
   typeName,
   waypointHeading,
   TerrainFollow,
-} from "./planner.js?v=20261028c";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261028c";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261028c";
+} from "./planner.js?v=20261029a";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029a";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029a";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -182,8 +183,15 @@ const handleLayer = L.layerGroup();
 
 /** Espacio que tapa el panel, para centrar la misión en la parte visible del mapa. */
 function fitPadding() {
-  if (window.innerWidth <= 760) return { paddingTopLeft: [24, 72], paddingBottomRight: [24, window.innerHeight * 0.52 + 32] };
-  return { paddingTopLeft: [$("panel").offsetWidth + 60, 80], paddingBottomRight: [80, 60] };
+  const padding =
+    window.innerWidth <= 760
+      ? // En el teléfono la vista previa esconde el panel.
+        { paddingTopLeft: [24, 72], paddingBottomRight: [24, document.body.classList.contains("previewing") ? 24 : window.innerHeight * 0.52 + 32] }
+      : { paddingTopLeft: [$("panel").offsetWidth + 60, 80], paddingBottomRight: [80, 60] };
+  // Con la vista previa abierta, tampoco debajo de su barra.
+  const bar = $("preview-bar");
+  if (!bar.hidden) padding.paddingBottomRight[1] = Math.max(padding.paddingBottomRight[1], window.innerHeight - bar.getBoundingClientRect().top + 24);
+  return padding;
 }
 
 function fitTo(points, maxZoom = 19) {
@@ -506,6 +514,7 @@ function openPlan(id, plan = null, componentId = null) {
 /** Muestra el plan (null) o uno de sus componentes. */
 function showView(componentId) {
   document.activeElement?.blur?.();
+  closePreview();
   const next = current.components.some((c) => c.id === componentId) ? componentId : null;
   if (next !== selectedId) selectedPoint = null;
   selectedId = next;
@@ -521,6 +530,7 @@ function showView(componentId) {
 
 function closeEditor() {
   if (!current) return;
+  closePreview();
   document.activeElement?.blur?.();
   // Una misión nueva sin área ni centro no se guarda.
   if (!hasGeometry(current) && !state.shas[current.id] && state.missions[current.id]) {
@@ -1516,6 +1526,11 @@ function buttonRow(params, buttons) {
 // ---------- Panel del plan ----------
 
 function buildPlanBody(body) {
+  if (planResult?.flown) {
+    const play = buttonParam(body, "Ver el vuelo", () => openPreview());
+    play.className = "button primary small wide preview-button";
+    play.insertAdjacentHTML("afterbegin", '<svg><use href="#i-play" /></svg>');
+  }
   section(body, "COMPONENTES");
   if (current.components.length === 0) {
     note(
@@ -2951,7 +2966,9 @@ setBase(baseLayers[storage.get(BASE_KEY)] ? storage.get(BASE_KEY) : "bing");
 setLabels(storage.get(LABELS_KEY) !== "0");
 
 document.addEventListener("keydown", (event) => {
-  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+  const active = document.activeElement;
+  // Una barra deslizante no es para escribir: ahí siguen andando los atajos.
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(active?.tagName) && active.type !== "range";
   const mod = event.ctrlKey || event.metaKey;
   if (mod && !typing && event.key.toLowerCase() === "z") {
     event.preventDefault();
@@ -2964,11 +2981,169 @@ document.addEventListener("keydown", (event) => {
     $("layer-menu").hidden = true;
   } else if (event.key === "Escape" && $("add-menu")) {
     $("add-menu").remove();
+  } else if (preview.timeline && event.key === "Escape") {
+    closePreview();
+  } else if (preview.timeline && event.key === " " && !typing) {
+    event.preventDefault();
+    togglePreview();
   } else if (event.key === "Escape" && !typing && current && !$("sync-dialog").open) {
     if (selectedId) componentBack();
     else closeEditor();
   }
 });
+
+// ---------- Vista previa del vuelo ----------
+
+/** La vista previa animada, como la de Dronelink: el dron recorre la misión a ×10, ×30 o ×100. */
+const preview = { timeline: null, time: 0, speed: 30, playing: false, frame: 0, last: 0, layer: L.layerGroup(), drone: null, trail: [], footprint: null };
+const PREVIEW_SPEED_KEY = "mini4pro.previewSpeed";
+preview.speed = Number(storage.get(PREVIEW_SPEED_KEY)) || 30;
+
+const clock = (seconds) => {
+  const s = Math.max(0, Math.round(seconds));
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+function openPreview() {
+  if (!current) return;
+  closePreview();
+  const timeline = FlightPreview.timeline(current);
+  if (!timeline.segments.length) return toast("La misión todavía no tiene nada que volar", true);
+  preview.timeline = timeline;
+  preview.time = 0;
+  const path = [timeline.segments[0].from.position, ...timeline.segments.map((s) => s.to.position)];
+  // Toda la ruta tenue y lo ya volado en blanco, que se distinga de las líneas de los componentes.
+  L.polyline(path, { color: "#fff", weight: 2, opacity: 0.4, dashArray: "4 6", interactive: false }).addTo(preview.layer);
+  preview.trail = [
+    L.polyline([], { color: "#000", weight: 7, opacity: 0.3, interactive: false }),
+    L.polyline([], { color: "#fff", weight: 3.5, opacity: 1, interactive: false }),
+  ];
+  preview.trail.forEach((line) => line.addTo(preview.layer));
+  preview.footprint = L.polygon([], { color: "#fff", weight: 1.5, fillColor: ACCENT, fillOpacity: 0.18, interactive: false }).addTo(preview.layer);
+  preview.drone = L.marker(path[0], {
+    icon: L.divIcon({
+      className: "",
+      html: `<div class="preview-drone"><svg class="cone" viewBox="0 0 120 120"><path d="M60,60 L${60 + 58 * Math.sin(rad(-LENS_DEGREES / 2))},${60 - 58 * Math.cos(rad(-LENS_DEGREES / 2))} A58,58 0 0 1 ${60 + 58 * Math.sin(rad(LENS_DEGREES / 2))},${60 - 58 * Math.cos(rad(LENS_DEGREES / 2))} Z" /></svg><span class="body"><svg viewBox="0 0 24 24"><path d="M12,3 L19,20 L12,16 L5,20 Z" /></svg></span></div>`,
+      iconSize: [120, 120],
+      iconAnchor: [60, 60],
+    }),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 2000,
+  }).addTo(preview.layer);
+  preview.layer.addTo(map);
+  $("map-hint").hidden = true;
+  $("preview-bar").hidden = false;
+  document.body.classList.add("previewing");
+  $("preview-total").textContent = clock(timeline.duration);
+  document.querySelectorAll("#preview-bar [data-speed]").forEach((b) => b.classList.toggle("selected", Number(b.dataset.speed) === preview.speed));
+  fitTo(planPoints(current));
+  showPreviewFrame();
+  playPreview(true);
+}
+
+function closePreview() {
+  if (!preview.timeline) return;
+  playPreview(false);
+  preview.timeline = null;
+  preview.layer.clearLayers();
+  map.removeLayer(preview.layer);
+  $("preview-bar").hidden = true;
+  document.body.classList.remove("previewing");
+  if (current) updateHint();
+}
+
+function playPreview(on) {
+  preview.playing = on;
+  cancelAnimationFrame(preview.frame);
+  const button = $("preview-play");
+  button.querySelector("use").setAttribute("href", on ? "#i-pause" : "#i-play");
+  button.title = on ? "Pausar (espacio)" : "Reproducir (espacio)";
+  button.setAttribute("aria-label", on ? "Pausar" : "Reproducir");
+  if (!on) return;
+  // Al final, vuelve a empezar.
+  if (preview.time >= preview.timeline.duration) preview.time = 0;
+  preview.last = performance.now();
+  const step = (now) => {
+    if (!preview.playing || !preview.timeline) return;
+    preview.time = Math.min(preview.timeline.duration, preview.time + ((now - preview.last) / 1000) * preview.speed);
+    preview.last = now;
+    showPreviewFrame(true);
+    if (preview.time >= preview.timeline.duration) playPreview(false);
+    else preview.frame = requestAnimationFrame(step);
+  };
+  preview.frame = requestAnimationFrame(step);
+}
+
+const togglePreview = () => playPreview(!preview.playing);
+
+/** Pone el dron, su rastro y lo que ve en el momento `preview.time`. Con `follow`, mueve el mapa si se sale. */
+function showPreviewFrame(follow = false) {
+  const { timeline } = preview;
+  const state = FlightPreview.at(timeline, preview.time);
+  if (!state) return;
+  preview.drone.setLatLng(state.position);
+  const el = preview.drone.getElement()?.querySelector(".preview-drone");
+  if (el) {
+    el.style.setProperty("--heading", `${state.heading}deg`);
+    // En un mapa o un corredor la cámara mira hacia abajo: se ve lo que cubre la foto, no un abanico.
+    const c = state.component;
+    const down = state.kind === "route" && (c?.type === "map" || c?.type === "corridor") && c.gimbalPitch <= -60;
+    el.classList.toggle("down", down || state.kind === "transit");
+  }
+  const done = timeline.segments.slice(0, state.index).map((s) => s.from.position);
+  const flown = [...done, timeline.segments[state.index].from.position, state.position];
+  preview.trail.forEach((line) => line.setLatLngs(flown));
+
+  const c = state.component;
+  if (state.kind === "route" && (c?.type === "map" || c?.type === "corridor") && c.gimbalPitch <= -60) {
+    const [w, h] = MapPlanner.footprint(cameraFor(c), Math.max(1, state.altitude));
+    const local = projection(state.position);
+    const a = rad(state.heading);
+    const corner = (x, y) => local.toGeo({ x: x * Math.cos(a) + y * Math.sin(a), y: -x * Math.sin(a) + y * Math.cos(a) });
+    preview.footprint.setLatLngs([corner(-w / 2, -h / 2), corner(w / 2, -h / 2), corner(w / 2, h / 2), corner(-w / 2, h / 2)]);
+  } else {
+    preview.footprint.setLatLngs([]);
+  }
+
+  $("preview-label").textContent = state.label;
+  const above = c && TerrainFollow.follows(c) && state.kind !== "transit" ? " sobre el suelo" : "";
+  const stats = [`${num(state.altitude)} m${above}`];
+  if (timeline.photoCount) stats.push(`${state.photos} de ${timeline.photoCount} fotos`);
+  $("preview-stats").textContent = stats.join(" · ");
+  $("preview-time").textContent = clock(preview.time);
+  $("preview-scrub").value = String(Math.round((preview.time / timeline.duration) * 1000));
+  if (follow) keepInView(state.position);
+}
+
+/** Si el dron se sale de lo que se ve (fuera del panel y de la barra), centra el mapa en él. */
+function keepInView(position) {
+  const {
+    paddingTopLeft: [left, top],
+    paddingBottomRight: [right, bottom],
+  } = fitPadding();
+  const size = map.getSize();
+  const box = { left: left - 40, top: top - 40, right: size.x - right + 40, bottom: size.y - bottom + 20 };
+  const p = map.latLngToContainerPoint(position);
+  if (p.x > box.left && p.x < box.right && p.y > box.top && p.y < box.bottom) return;
+  map.panBy([p.x - (box.left + box.right) / 2, p.y - (box.top + box.bottom) / 2], { animate: true, duration: 0.4 });
+}
+
+$("preview-play").addEventListener("click", togglePreview);
+$("preview-close").addEventListener("click", closePreview);
+$("preview-scrub").addEventListener("input", (event) => {
+  if (!preview.timeline) return;
+  playPreview(false);
+  preview.time = (Number(event.target.value) / 1000) * preview.timeline.duration;
+  showPreviewFrame(true);
+});
+document.querySelectorAll("#preview-bar [data-speed]").forEach((button) =>
+  button.addEventListener("click", () => {
+    preview.speed = Number(button.dataset.speed);
+    storage.set(PREVIEW_SPEED_KEY, String(preview.speed));
+    document.querySelectorAll("#preview-bar [data-speed]").forEach((b) => b.classList.toggle("selected", b === button));
+  }),
+);
 
 // ---------- Buscar lugares ----------
 
