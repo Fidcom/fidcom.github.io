@@ -6,6 +6,9 @@ const METERS_PER_DEG = 111320;
 const rad = (d) => (d * Math.PI) / 180;
 const deg = (r) => (r * 180) / Math.PI;
 
+/** Español de Puerto Rico: punto decimal, como en el teléfono. */
+export const LOCALE = "es-PR";
+
 /** DJI Mini 4 Pro en modo de 48 MP (los mismos datos que usa Dronelink). */
 export const MINI_4_PRO = {
   name: "Mini 4 Pro (48 MP)",
@@ -105,7 +108,7 @@ export const EXPOSURE_MODES = [
 /** Compensación de exposición, de -3 a +3 en tercios. */
 export const EV_VALUES = Array.from({ length: 19 }, (_, i) => Math.round(((i - 9) / 3) * 10) / 10).map((v) => [
   v,
-  `${v > 0 ? "+" : ""}${v.toLocaleString("es", { minimumFractionDigits: 1 })}`,
+  `${v > 0 ? "+" : ""}${v.toLocaleString(LOCALE, { minimumFractionDigits: 1 })}`,
 ]);
 
 export const ISO_VALUES = [100, 200, 400, 800, 1600, 3200, 6400].map((v) => [v, String(v)]);
@@ -568,7 +571,7 @@ export function formatDuration(seconds) {
 }
 
 const num = (value, decimals = 0) =>
-  value.toLocaleString("es", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  value.toLocaleString(LOCALE, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
 export function summary(mission) {
   if (mission.type === "map") {
