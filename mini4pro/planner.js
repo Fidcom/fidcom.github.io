@@ -754,16 +754,17 @@ export const PlanPlanner = {
 };
 
 /** Todos los puntos del plan, para encuadrarlo en el mapa. */
+/** Los puntos de un componente: las esquinas del área o el círculo de la órbita. */
+export function componentPoints(component) {
+  if (component.type === "map") return component.boundary;
+  return OrbitPlanner.plan(component)?.path ?? [];
+}
+
+/** Todos los puntos del plan, con el despegue aunque sea automático, para encuadrarlo en el mapa. */
 export function planPoints(plan) {
-  const points = [];
-  for (const component of plan.components) {
-    if (component.type === "map") points.push(...component.boundary);
-    else {
-      const orbit = OrbitPlanner.plan(component);
-      if (orbit) points.push(...orbit.path);
-    }
-  }
-  if (plan.takeoff) points.push(plan.takeoff);
+  const points = plan.components.flatMap(componentPoints);
+  const takeoff = takeoffOf(plan);
+  if (takeoff) points.push(takeoff);
   return points;
 }
 

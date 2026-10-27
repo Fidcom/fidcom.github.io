@@ -9,12 +9,14 @@ import {
   MINI_4_PRO_12MP,
   OrbitPlanner,
   PlanPlanner,
+  componentPoints,
   copyComponent,
   newMapComponent,
   newOrbitComponent,
   newPlan,
   normalizePlan,
   parseKml,
+  planPoints,
   projection,
   serializePlan,
   takeoffOf,
@@ -281,4 +283,12 @@ test("un duplicado va al lado del original, no encima", () => {
   const orbit = { ...newOrbitComponent(origin), radius: 30 };
   assert.ok(Math.abs(Geo.distance(origin, copyComponent(orbit).center) - 70) < 0.5);
   assert.equal(copyComponent(newOrbitComponent()).center, null);
+});
+
+test("encuadrar el plan incluye la H automática", () => {
+  const plan = newPlan("Plan", [newMapComponent(square)]);
+  const points = planPoints(plan);
+  assert.equal(points.length, square.length + 1);
+  assert.deepEqual(points.at(-1), takeoffOf(plan));
+  assert.deepEqual(componentPoints(plan.components[0]), square);
 });

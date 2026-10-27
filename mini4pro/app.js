@@ -42,11 +42,12 @@ import {
   num,
   parseKml,
   planPoints,
+  componentPoints,
   projection,
   summary,
   takeoffOf,
-} from "./planner.js?v=20261027d";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261027d";
+} from "./planner.js?v=20261027e";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261027e";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -1142,7 +1143,7 @@ function addComponent(component) {
   current.components.push(component);
   save();
   showView(component.id);
-  const points = planPoints({ ...current, components: [component], takeoff: null });
+  const points = componentPoints(component);
   if (points.length) fitTo(points);
 }
 
@@ -1672,7 +1673,7 @@ $("tool-clear").addEventListener("click", () => {
 $("tool-fit").addEventListener("click", () => {
   if (!current) return fitAll();
   const component = selected();
-  fitTo(planPoints(component ? { ...current, components: [component], takeoff: null } : current));
+  fitTo(component ? componentPoints(component) : planPoints(current));
 });
 $("tool-locate").addEventListener("click", () => {
   if (!navigator.geolocation) return toast("Este navegador no da la ubicación", true);
