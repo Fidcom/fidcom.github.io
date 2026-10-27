@@ -1,5 +1,5 @@
 // Planificador de misiones para el DJI Mini 4 Pro: la versión de PC del editor de la app Mini4Pro.
-// Una misión es un plan con componentes en fila (mapas, órbitas, waypoints, fotos y panorámicas),
+// Una misión es un plan con componentes en fila (mapas, corredores, órbitas, waypoints, fotos y panorámicas),
 // como en Dronelink. Se guardan en este navegador y, si hay token, en GitHub para que las lea el teléfono.
 import {
   CAPTURE_MODES,
@@ -26,6 +26,7 @@ import {
   VIDEO_RESOLUTIONS,
   WAYPOINT_ACTIONS,
   WHITE_BALANCES,
+  CorridorPlanner,
   Geo,
   LENS_DEGREES,
   LOCALE,
@@ -43,6 +44,7 @@ import {
   formatDuration,
   hasGeometry,
   isKnown,
+  newCorridorComponent,
   newMapComponent,
   newOrbitComponent,
   newPanoComponent,
@@ -61,8 +63,8 @@ import {
   takeoffOf,
   typeName,
   waypointHeading,
-} from "./planner.js?v=20261028a";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261028a";
+} from "./planner.js?v=20261028b";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261028b";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -133,7 +135,7 @@ const rad = (d) => (d * Math.PI) / 180;
 
 const selected = () => current?.components.find((c) => c.id === selectedId) ?? null;
 const selectedItem = () => planResult?.items.find((item) => item.component.id === selectedId) ?? null;
-const TYPE_ICONS = { map: "grid", orbit: "orbit", waypoints: "waypoints", photo: "camera", pano: "pano" };
+const TYPE_ICONS = { map: "grid", corridor: "corridor", orbit: "orbit", waypoints: "waypoints", photo: "camera", pano: "pano" };
 const typeIcon = (component) => TYPE_ICONS[component.type] ?? "plan";
 const isPointType = (component) => component?.type === "photo" || component?.type === "pano";
 
@@ -306,6 +308,35 @@ function drawComponent({ component, result }, { faded, dim, arrows, interactive,
         for (const leg of result.legs) {
           const mid = [(leg.start[0] + leg.end[0]) / 2, (leg.start[1] + leg.end[1]) / 2];
           layers.push(arrow(mid, Geo.bearing(leg.start, leg.end)));
+        }
+      }
+    }
+  } else if (component.type === "corridor") {
+    const outline = CorridorPlanner.outline(component);
+    if (outline.length >= 3) {
+      layers.push(
+        L.polygon(outline, {
+          color: "#ffffff",
+          weight: dim ? 1.5 : 2.5,
+          opacity: faded || dim ? 0.7 : 1,
+          fillColor: "#ffffff",
+          fillOpacity: faded || dim ? 0.08 : 0.16,
+          interactive,
+        }),
+      );
+    }
+    // La línea del centro, punteada, para ver lo que se dibujó.
+    if (component.path.length >= 2 && !faded) {
+      layers.push(L.polyline(component.path, { color: "#ffffff", weight: 1.5, opacity: dim ? 0.6 : 0.9, dashArray: "5 5", interactive }));
+    }
+    if (result) {
+      layers.push(L.polyline(result.path, route));
+      if (arrows) {
+        for (const pass of result.passes) {
+          pass.slice(1).forEach((to, i) => {
+            const from = pass[i];
+            if (Geo.distance(from, to) > 15) layers.push(arrow([(from[0] + to[0]) / 2, (from[1] + to[1]) / 2], Geo.bearing(from, to)));
+          });
         }
       }
     }
@@ -613,6 +644,17 @@ function renderStats() {
       ["GSD", `${num(info.gsdCmPerPx, 2)} cm/px`],
       ["Líneas", result ? String(result.legs.length) : "—"],
     ];
+  } else if (component.type === "corridor") {
+    stats = [
+      ["Duración", result ? formatDuration(result.durationSeconds) : "—"],
+      component.captureMode === "photo"
+        ? ["Fotos", result ? String(result.photoCount) : "—"]
+        : ["Captura", component.captureMode === "video" ? "Video" : "Nada"],
+      ["Distancia", result ? distanceText(result.lengthMeters) : "—"],
+      ["Largo", result ? distanceText(result.centerMeters) : "—"],
+      ["GSD", `${num(MapPlanner.gsd(cameraFor(component), component.altitude), 2)} cm/px`],
+      ["Pasadas", result ? String(result.passes.length) : "—"],
+    ];
   } else if (isPointType(component)) {
     stats = [
       ["Duración", result ? formatDuration(result.durationSeconds) : "—"],
@@ -637,7 +679,7 @@ function updateHint() {
   if (!component) {
     hint.textContent = current.components.length
       ? "Haz clic en un componente para editarlo · arrastra la H morada para mover el despegue"
-      : "Añade un componente a la misión: un mapa, una órbita, waypoints, una foto o una panorámica";
+      : "Añade un componente a la misión: un mapa, un corredor, una órbita, waypoints, una foto o una panorámica";
   } else if (component.type === "map") {
     const n = component.boundary.length;
     hint.textContent =
@@ -648,6 +690,14 @@ function updateHint() {
           : n < 3
             ? "Sigue marcando esquinas: hacen falta al menos 3"
             : "Arrastra el centro para mover el área · las esquinas para cambiarla · el + para agregar otra · el pin para empezar en otra esquina";
+  } else if (component.type === "corridor") {
+    const n = component.path.length;
+    hint.textContent =
+      n === 0
+        ? "Haz clic en el mapa donde empieza el corredor: vas a marcar la línea de su centro"
+        : n === 1
+          ? "Sigue haciendo clic por el centro del corredor, punto por punto"
+          : "Haz clic en el mapa para alargar la línea · arrastra un punto o un + para cambiarla, o el centro para mover todo · clic en un punto para quitarlo";
   } else if (component.type === "orbit") {
     hint.textContent = component.center
       ? "Arrastra el centro para mover la órbita · el cuadrito para cambiar el radio · el pin para cambiar dónde empieza"
@@ -681,6 +731,8 @@ map.on("click", (event) => {
   const point = toPoint(event.latlng);
   if (component.type === "map") {
     editGeometry(() => (component.boundary = Geo.insertIntoPolygon(component.boundary, point)));
+  } else if (component.type === "corridor") {
+    editGeometry(() => component.path.push(point));
   } else if (component.type === "orbit") {
     if (!component.center) editGeometry(() => (component.center = point));
   } else if (component.type === "waypoints") {
@@ -764,6 +816,7 @@ function drawHandles() {
   drawTakeoffHandle();
   const component = selected();
   if (component?.type === "map") drawAreaHandles(component);
+  else if (component?.type === "corridor") drawCorridorHandles(component);
   else if (component?.type === "orbit" && component.center) drawOrbitHandles(component);
   else if (component?.type === "waypoints") drawWaypointHandles(component);
   else if (isPointType(component) && component.position) drawPointHandles(component);
@@ -866,6 +919,83 @@ function drawAreaHandles(component) {
     marker.options.title = "Arrastra a otra esquina para empezar por ahí";
     const wasAuto = component.start === null;
     draggable(marker, (point) => (component.start = point), { follow: false, done: () => wasAuto && buildPanel() });
+    addHandle(marker, () => selectedItem()?.result?.path[0]);
+  }
+}
+
+/**
+ * La línea del centro de un corredor: sus puntos se arrastran para cambiarla y se quitan con clic,
+ * un + entre dos mete otro en medio y el círculo del centro la mueve entera.
+ */
+function drawCorridorHandles(component) {
+  const midpointOf = (i) => {
+    const a = component.path[i];
+    const b = component.path[i + 1];
+    return a && b ? [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] : null;
+  };
+
+  for (let i = 0; i < component.path.length - 1; i++) {
+    const marker = L.marker(midpointOf(i), {
+      icon: divIcon("mid-handle", 16, "+"),
+      draggable: true,
+      zIndexOffset: 500,
+      title: "Arrastra o toca para agregar un punto",
+    });
+    let inserted = -1;
+    marker.on("dragstart", () => {
+      remember();
+      inserted = i + 1;
+      component.path.splice(inserted, 0, toPoint(marker.getLatLng()));
+    });
+    marker.on("drag", () => {
+      component.path[inserted] = toPoint(marker.getLatLng());
+      redrawShapes();
+    });
+    marker.on("dragend", () => {
+      save();
+      refresh();
+    });
+    marker.on("click", (event) => {
+      L.DomEvent.stop(event);
+      editGeometry(() => component.path.splice(i + 1, 0, midpointOf(i)));
+    });
+    addHandle(marker, () => midpointOf(i));
+  }
+
+  component.path.forEach((point, i) => {
+    const marker = L.marker(point, { icon: divIcon("vertex-handle", 20), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
+    draggable(marker, (p) => (component.path[i] = p));
+    const removeVertex = (event) => {
+      L.DomEvent.stop(event);
+      editGeometry(() => component.path.splice(i, 1));
+    };
+    marker.on("click", removeVertex);
+    marker.on("contextmenu", removeVertex);
+    addHandle(marker, () => component.path[i]);
+  });
+
+  if (component.path.length >= 2) {
+    const at = () => Geo.centroid(component.path);
+    const marker = L.marker(at(), {
+      icon: divIcon("move-handle", 32, '<svg><use href="#i-move" /></svg>'),
+      draggable: true,
+      zIndexOffset: 1100,
+      title: "Arrastra para mover todo el corredor",
+    });
+    let from = null;
+    let path = null;
+    marker.on("dragstart", () => {
+      from = at();
+      path = component.path;
+    });
+    draggable(marker, (to) => (component.path = Geo.translate(path, from, to).map(([lat, lon]) => [round7(lat), round7(lon)])));
+    addHandle(marker, at);
+  }
+
+  // El pin de inicio: empieza en el extremo (y el lado) más cerca de donde viene el dron.
+  const item = selectedItem();
+  if (item?.result) {
+    const marker = startPin(item);
     addHandle(marker, () => selectedItem()?.result?.path[0]);
   }
 }
@@ -1109,6 +1239,7 @@ function buildPanel() {
   if (component) {
     buildComponentHeader(component);
     if (component.type === "map") buildMapParams(container, component);
+    else if (component.type === "corridor") buildCorridorParams(container, component);
     else if (component.type === "orbit") buildOrbitParams(container, component);
     else if (component.type === "waypoints" && component.points[selectedPoint]) buildWaypointParams(container, component, selectedPoint);
     else if (component.type === "waypoints") buildWaypointsParams(container, component);
@@ -1383,7 +1514,10 @@ function buttonRow(params, buttons) {
 function buildPlanBody(body) {
   section(body, "COMPONENTES");
   if (current.components.length === 0) {
-    note(body, "La misión está vacía. Añade un mapa (un área para fotografiar), una órbita (un círculo alrededor de algo), waypoints (un recorrido por puntos), una foto o una panorámica.");
+    note(
+      body,
+      "La misión está vacía. Añade un mapa (un área para fotografiar), un corredor (franjas a lo largo de un río o un camino), una órbita (un círculo alrededor de algo), waypoints (un recorrido por puntos), una foto o una panorámica.",
+    );
   }
   current.components.forEach((component, index) => {
     const card = document.createElement("button");
@@ -1408,6 +1542,7 @@ function buildPlanBody(body) {
     event.stopPropagation();
     toggleAddMenu(add, [
       ["grid", "Mapa", "Un área para fotografiar en líneas", () => addComponent(newMapComponent())],
+      ["corridor", "Corredor", "Franjas a lo largo de un río, un camino o una costa", () => addComponent(newCorridorComponent())],
       ["orbit", "Órbita", "Un círculo alrededor de un punto", () => addComponent(newOrbitComponent())],
       ["waypoints", "Waypoints", "Un recorrido por puntos, con foto o espera en cada uno", () => addComponent(newWaypointsComponent())],
       ["camera", "Foto", "Una foto desde un punto, mirando hacia donde quieras", () => addComponent(newPhotoComponent())],
@@ -1800,6 +1935,137 @@ function buildMapParams(params, c) {
 
   section(params, "SEGURIDAD");
   toggleParam(params, c, { key: "highWindTolerance", label: "Tolerancia a viento fuerte", help: "Corrige más fuerte cuando el viento lo saca de la línea" });
+}
+
+function buildCorridorParams(params, c) {
+  const plan = () => selectedItem()?.result ?? CorridorPlanner.plan(c);
+  const photos = c.captureMode === "photo";
+
+  section(params, "CORREDOR");
+  numberParam(params, c, {
+    key: "width",
+    label: "Ancho",
+    unit: "m",
+    min: 0,
+    max: 500,
+    slider: true,
+    help: () => {
+      const spacing = CorridorPlanner.spacing(c);
+      const passes = CorridorPlanner.passCount(c.width, spacing.line);
+      if (passes === 1) return `Una sola pasada por el centro${c.width < 1 ? " (0 = solo la línea, útil para video)" : ""}`;
+      return `${passes} pasadas separadas ${num(spacing.line, 1)} m, la mitad a cada lado de la línea`;
+    },
+  });
+  note(params, "Empieza en el extremo más cerca de donde viene el dron y va y vuelve por pasadas paralelas a la línea, mirando hacia adelante.");
+
+  section(params, "VUELO");
+  numberParam(params, c, {
+    key: "altitude",
+    label: "Altura sobre el despegue",
+    unit: "m",
+    min: 5,
+    max: 120,
+    slider: true,
+    help: () => {
+      const [w, h] = MapPlanner.footprint(cameraFor(c), c.altitude);
+      return `GSD ${num(MapPlanner.gsd(cameraFor(c), c.altitude), 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`;
+    },
+  });
+  numberParam(params, c, {
+    key: "maxSpeed",
+    label: "Velocidad máxima",
+    unit: "km/h",
+    scale: KMH,
+    min: 3,
+    max: 54,
+    step: 0.5,
+    decimals: 1,
+    help: () => {
+      const speed = plan()?.speed ?? c.maxSpeed;
+      const limited = speed < c.maxSpeed - 0.05;
+      return `Volará a ${num(speed * KMH, 1)} km/h${limited ? ", limitada por el tiempo entre fotos" : ""}`;
+    },
+  });
+
+  section(params, "CAPTURA");
+  choiceParam(params, c, { key: "captureMode", label: "Durante las pasadas", options: CAPTURE_MODES, rebuild: true });
+  if (photos) {
+    choiceParam(params, c, {
+      key: "photoSize",
+      label: "Tamaño de foto",
+      options: PHOTO_SIZES,
+      help: () => (c.photoSize === "12mp" ? "Menos detalle, pero guarda cada foto en unos 2 s" : "Más detalle; guarda cada foto en unos 5 s"),
+    });
+    numberParam(params, c, {
+      key: "minPhotoInterval",
+      label: "Tiempo mínimo entre fotos",
+      unit: "s",
+      min: 1,
+      max: 10,
+      step: 0.5,
+      decimals: 1,
+      help: () => "Lo más rápido que la cámara guarda cada foto",
+    });
+    choiceParam(params, c, {
+      key: "photoType",
+      label: "Tipo de foto",
+      options: PHOTO_TYPES,
+      help: () => (c.photoType === "single" ? "" : "Varias fotos con distinta exposición en cada punto, para HDR"),
+    });
+    numberParam(params, c, {
+      key: "captureSpeed",
+      label: "Velocidad al tomar la foto",
+      unit: "km/h",
+      scale: KMH,
+      min: 0,
+      max: 54,
+      step: 0.5,
+      decimals: 1,
+      optional: true,
+      placeholder: "Sin frenar",
+      help: () =>
+        c.captureSpeed === null
+          ? "Déjalo vacío para no frenar; 0 = se detiene en cada foto"
+          : c.captureSpeed === 0
+            ? "Se detiene en cada foto: más nítidas, vuelo más largo"
+            : "Frena en cada foto: más nítidas, vuelo más largo",
+    });
+  }
+
+  section(params, "TRASLAPE");
+  if (photos) {
+    numberParam(params, c, {
+      key: "frontOverlap",
+      label: "Traslape frontal",
+      unit: "%",
+      min: 10,
+      max: 95,
+      slider: true,
+      help: () => `Una foto cada ${num(CorridorPlanner.spacing(c).photo, 1)} m`,
+    });
+  }
+  numberParam(params, c, {
+    key: "sideOverlap",
+    label: "Traslape lateral",
+    unit: "%",
+    min: 10,
+    max: 95,
+    slider: true,
+    help: () => `Pasadas separadas ${num(CorridorPlanner.spacing(c).line, 1)} m`,
+  });
+
+  section(params, "GIMBAL");
+  numberParam(params, c, {
+    key: "gimbalPitch",
+    label: "Inclinación del gimbal",
+    unit: "°",
+    min: -90,
+    max: 0,
+    slider: true,
+    help: () => (c.gimbalPitch <= -89 ? "-90° = mirando hacia abajo" : "Mirando hacia adelante a lo largo de la línea"),
+  });
+
+  if (c.captureMode !== "none") cameraSettingsParams(params, c, { photo: photos });
 }
 
 function buildOrbitParams(params, c) {
@@ -2198,6 +2464,7 @@ $("new-more").addEventListener("click", (event) => {
   toggleAddMenu(
     $("new-more"),
     [
+      ["corridor", "Corredor", "Franjas a lo largo de un río, un camino o una costa", () => newMission(newCorridorComponent())],
       ["waypoints", "Waypoints", "Un recorrido por puntos, con foto o espera en cada uno", () => newMission(newWaypointsComponent())],
       ["camera", "Foto", "Una foto desde un punto, mirando hacia donde quieras", () => newMission(newPhotoComponent())],
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => newMission(newPanoComponent())],
@@ -2297,6 +2564,8 @@ $("tool-clear").addEventListener("click", () => {
     if (component.type === "map") {
       component.boundary = [];
       component.start = null;
+    } else if (component.type === "corridor") {
+      component.path = [];
     } else if (component.type === "orbit") {
       component.center = null;
     } else if (component.type === "waypoints") {

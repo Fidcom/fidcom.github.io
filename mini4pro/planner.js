@@ -443,6 +443,136 @@ function extendLeg(leg, meters) {
   };
 }
 
+// ---- Corredor ----
+
+/** Una esquina por fuera que haría una punta más larga que esto (en veces la distancia) se corta. */
+const MITER_LIMIT = 2;
+/** Puntos más cerca que esto (m) cuentan como uno. */
+const SAME_POINT = 0.5;
+/** Segundos para frenar, girar y arrancar en cada tramo de un corredor. */
+const CORRIDOR_TURN_SECONDS = 4;
+
+const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
+const add = (a, b) => ({ x: a.x + b.x, y: a.y + b.y });
+const scale = (a, k) => ({ x: a.x * k, y: a.y * k });
+const dotV = (a, b) => a.x * b.x + a.y * b.y;
+const cross = (a, b) => a.x * b.y - a.y * b.x;
+const lengthV = (a) => Math.hypot(a.x, a.y);
+
+function dedupe(points) {
+  const out = [];
+  for (const p of points) if (!out.length || lengthV(sub(p, out.at(-1))) >= SAME_POINT) out.push(p);
+  return out;
+}
+
+/** Dónde se unen dos tramos corridos: en la esquina donde se cruzan, o cortada si haría mucha punta. */
+function joinEdges(a, b, d) {
+  const turn = cross(a.dir, b.dir);
+  const cos = dotV(a.dir, b.dir);
+  if (Math.abs(turn) < 1e-9) return cos > 0 ? [a.end] : [a.end, b.start];
+  // Gira a la derecha (turn < 0) con la línea a la derecha (d > 0): esa esquina queda por dentro.
+  const inside = turn < 0 === d > 0;
+  if (!inside && 1 / Math.sqrt((1 + cos) / 2) > MITER_LIMIT) return [a.end, b.start];
+  const t = cross(sub(b.start, a.start), b.dir) / turn;
+  return [add(a.start, scale(a.dir, t))];
+}
+
+/** Las pasadas de un corredor, igual que CorridorPlanner en Kotlin. */
+export const CorridorPlanner = {
+  /** Separación entre pasadas y entre fotos; el dron mira hacia donde vuela. */
+  spacing(c) {
+    const [footWidth, footHeight] = MapPlanner.footprint(cameraFor(c), c.altitude);
+    return {
+      line: Math.max(1, footWidth * (1 - c.sideOverlap / 100)),
+      photo: Math.max(0.5, footHeight * (1 - c.frontOverlap / 100)),
+    };
+  },
+
+  /** Cuántas pasadas cubren `width` metros con pasadas cada `line` metros (como las líneas de un mapa). */
+  passCount: (width, line) => Math.max(1, Math.ceil(width / line - 1e-9)),
+
+  /**
+   * La línea `points` (en metros) corrida `d` metros a la derecha según el sentido en que va
+   * (negativo: a la izquierda). Por fuera de una curva cerrada corta la esquina; por dentro, los
+   * tramos que quedarían al revés se quitan para no hacer un rizo.
+   */
+  offset(points, d) {
+    const line = dedupe(points);
+    if (line.length < 2 || Math.abs(d) < 1e-9) return line;
+    const edges = [];
+    for (let i = 1; i < line.length; i++) {
+      const v = sub(line[i], line[i - 1]);
+      const dir = scale(v, 1 / lengthV(v));
+      const normal = { x: dir.y, y: -dir.x };
+      edges.push({ start: add(line[i - 1], scale(normal, d)), end: add(line[i], scale(normal, d)), dir });
+    }
+    for (;;) {
+      const joins = edges.slice(0, -1).map((edge, i) => joinEdges(edge, edges[i + 1], d));
+      const entries = edges.map((edge, i) => (i === 0 ? edge.start : joins[i - 1].at(-1)));
+      const exits = edges.map((edge, i) => (i === edges.length - 1 ? edge.end : joins[i][0]));
+      const reversed = edges.findIndex((edge, i) => dotV(sub(exits[i], entries[i]), edge.dir) < 0);
+      if (reversed < 0 || edges.length === 1) return dedupe([entries[0], ...joins.flat(), exits.at(-1)]);
+      edges.splice(reversed, 1);
+    }
+  },
+
+  /** `from`: de dónde viene el dron, para empezar en el extremo más cercano. */
+  plan(c, from = null) {
+    if (c.path.length < 2) return null;
+    const pr = projection(Geo.centroid(c.path));
+    const center = dedupe(c.path.map(pr.toLocal));
+    if (center.length < 2) return null;
+    const photos = c.captureMode === "photo";
+    const spacing = CorridorPlanner.spacing(c);
+    // La cámara no puede tomar fotos más rápido que minPhotoInterval.
+    const speed = photos ? Math.max(0.5, Math.min(c.maxSpeed, spacing.photo / c.minPhotoInterval)) : c.maxSpeed;
+    const count = CorridorPlanner.passCount(c.width, spacing.line);
+    let passes = [];
+    for (let i = 0; i < count; i++) {
+      // De izquierda a derecha, en sentidos alternos.
+      const line = CorridorPlanner.offset(center, (i - (count - 1) / 2) * spacing.line);
+      passes.push((i % 2 === 0 ? line : [...line].reverse()).map(pr.toGeo));
+    }
+    if (from) {
+      const flipped = passes.map((pass) => [...pass].reverse());
+      const options = [passes, flipped, [...passes].reverse(), [...flipped].reverse()];
+      passes = options.reduce((best, option) => (Geo.distance(from, option[0][0]) < Geo.distance(from, best[0][0]) ? option : best));
+    }
+    const positions = passes.reduce((sum, pass) => sum + Math.floor(Geo.pathLength(pass) / spacing.photo + 1e-9) + 1, 0);
+    const path = passes.flat();
+    const length = Geo.pathLength(path);
+    const segments = passes.reduce((sum, pass) => sum + pass.length - 1, 0);
+    const stops =
+      photos && c.captureSpeed !== null && c.captureSpeed < speed
+        ? positions * ((speed - c.captureSpeed) / ACCELERATION + (c.captureSpeed === 0 ? 1 : 0))
+        : 0;
+    return {
+      passes,
+      path,
+      lineSpacing: spacing.line,
+      photoSpacing: spacing.photo,
+      speed,
+      positions: photos ? positions : 0,
+      photoCount: photos ? positions * shotsOf(c.photoType) : 0,
+      lengthMeters: length,
+      durationSeconds: length / speed + segments * CORRIDOR_TURN_SECONDS + stops,
+      gsdCmPerPx: MapPlanner.gsd(cameraFor(c), c.altitude),
+      centerMeters: Geo.pathLength(c.path),
+    };
+  },
+
+  /** El borde del corredor (el lado izquierdo de ida y el derecho de vuelta), o vacío sin ancho. */
+  outline(c) {
+    if (c.path.length < 2 || c.width < 1) return [];
+    const pr = projection(Geo.centroid(c.path));
+    const center = dedupe(c.path.map(pr.toLocal));
+    if (center.length < 2) return [];
+    const left = CorridorPlanner.offset(center, -c.width / 2);
+    const right = CorridorPlanner.offset(center, c.width / 2);
+    return [...left, ...right.reverse()].map(pr.toGeo);
+  },
+};
+
 export const OrbitPlanner = {
   /**
    * Rumbo desde el centro donde empieza: el que se escogió, o el punto del círculo más cercano a
@@ -743,6 +873,34 @@ export function newPhotoComponent(position = null) {
   };
 }
 
+/**
+ * Corredor: franjas paralelas a lo largo de una línea (un río, un camino, una costa). Con ancho 0
+ * vuela solo la línea, útil para video.
+ */
+export function newCorridorComponent(path = []) {
+  return {
+    id: componentId(),
+    type: "corridor",
+    name: null,
+    enabled: true,
+    altitude: 30,
+    // La línea del centro, en el orden en que se dibujó.
+    path,
+    // Ancho que se quiere cubrir (m), la mitad a cada lado de la línea.
+    width: 40,
+    frontOverlap: 75,
+    sideOverlap: 70,
+    gimbalPitch: -90,
+    maxSpeed: 8,
+    minPhotoInterval: 5,
+    captureMode: "photo",
+    photoSize: "48mp",
+    photoType: "single",
+    captureSpeed: null,
+    ...emptyCameraSettings(),
+  };
+}
+
 /** Panorámica desde un punto, como el componente "Panorama" de Dronelink y las de DJI Fly. */
 export function newPanoComponent(position = null) {
   return {
@@ -763,6 +921,7 @@ export function newPanoComponent(position = null) {
 
 const NEW_COMPONENTS = {
   map: newMapComponent,
+  corridor: newCorridorComponent,
   orbit: newOrbitComponent,
   waypoints: newWaypointsComponent,
   photo: newPhotoComponent,
@@ -806,6 +965,13 @@ export function normalizeComponent(json) {
     component.points = (Array.isArray(json.points) ? json.points : []).map((p) => normalizeWaypoint(p, component.altitude)).filter(Boolean);
     if (!(component.speed > 0)) component.speed = base.speed;
     if (!(component.photoInterval > 0)) component.photoInterval = base.photoInterval;
+  }
+  if (type === "corridor") {
+    component.path = (Array.isArray(json.path) ? json.path : []).filter(isPoint);
+    if (!(component.width >= 0)) component.width = base.width;
+    if (!(component.maxSpeed > 0)) component.maxSpeed = base.maxSpeed;
+    if (!(component.minPhotoInterval > 0)) component.minPhotoInterval = base.minPhotoInterval;
+    if (!Number.isFinite(component.captureSpeed)) component.captureSpeed = null;
   }
   if (type === "photo" || type === "pano") {
     if (!isPoint(component.position)) component.position = null;
@@ -901,6 +1067,9 @@ export function copyComponent(component, gap = 10) {
     const to = pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + gap, y: 0 });
     copy.boundary = Geo.translate(copy.boundary, anchor, to);
     if (copy.start) copy.start = Geo.translate([copy.start], anchor, to)[0];
+  } else if (copy.type === "corridor") {
+    const xs = copy.path.map((p) => pr.toLocal(p).x);
+    copy.path = Geo.translate(copy.path, anchor, pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + copy.width + gap, y: 0 }));
   } else if (copy.type === "orbit") {
     const radius = Math.max(copy.radius, copy.finalRadius ?? 0);
     copy.center = pr.toGeo({ x: 2 * radius + gap, y: 0 });
@@ -915,18 +1084,20 @@ export function copyComponent(component, gap = 10) {
   return copy;
 }
 
-const TYPE_NAMES = { map: "Mapa", orbit: "Órbita", waypoints: "Waypoints", photo: "Foto", pano: "Panorama" };
+const TYPE_NAMES = { map: "Mapa", corridor: "Corredor", orbit: "Órbita", waypoints: "Waypoints", photo: "Foto", pano: "Panorama" };
 
 /** "Mapa", "Órbita"…: el nombre del tipo de componente. */
 export const typeName = (component) => TYPE_NAMES[component.type] ?? `Componente nuevo (${component.type})`;
 
 export const componentName = (component) => component.name || typeName(component);
 
-/** Punto de referencia del componente: el centro del área o de la órbita, el primer waypoint o el punto. */
+/** Punto de referencia del componente: el centro del área, del corredor o de la órbita, el primer waypoint o el punto. */
 export function anchorOf(component) {
   switch (component.type) {
     case "map":
       return component.boundary.length ? Geo.centroid(component.boundary) : null;
+    case "corridor":
+      return component.path.length ? Geo.centroid(component.path) : null;
     case "orbit":
       return component.center;
     case "waypoints":
@@ -949,8 +1120,9 @@ export function autoTakeoff(component) {
   const anchor = anchorOf(component);
   if (!anchor) return null;
   const pr = projection(anchor);
-  if (component.type === "map") {
-    const south = Math.min(...component.boundary.map((p) => pr.toLocal(p).y));
+  if (component.type === "map" || component.type === "corridor") {
+    const points = component.type === "map" ? component.boundary : componentPoints(component);
+    const south = Math.min(...points.map((p) => pr.toLocal(p).y));
     return pr.toGeo({ x: 0, y: south - AUTO_TAKEOFF_METERS });
   }
   if (component.type === "orbit") {
@@ -976,6 +1148,8 @@ export function componentPlan(component, from = null) {
   switch (component.type) {
     case "map":
       return MapPlanner.plan(component, from);
+    case "corridor":
+      return CorridorPlanner.plan(component, from);
     case "orbit":
       return OrbitPlanner.plan(component, from);
     case "waypoints":
@@ -1052,11 +1226,15 @@ export const PlanPlanner = {
   },
 };
 
-/** Los puntos de un componente: las esquinas del área, el círculo de la órbita o los waypoints. */
+/** Los puntos de un componente: las esquinas del área, el borde del corredor, el círculo de la órbita o los waypoints. */
 export function componentPoints(component) {
   switch (component.type) {
     case "map":
       return component.boundary;
+    case "corridor": {
+      const outline = CorridorPlanner.outline(component);
+      return outline.length ? outline : component.path;
+    }
     case "orbit":
       return OrbitPlanner.plan(component)?.path ?? [];
     case "waypoints":
@@ -1123,6 +1301,17 @@ export function componentSummary(component) {
     if (!component.position) return `${num(component.altitude)} m · sin punto`;
     const label = PANO_TYPES.find(([k]) => k === component.panoType)?.[1] ?? "";
     return `${num(component.altitude)} m · ${label} · ${PanoPlan.shots(component.panoType, component.heading, component.gimbalPitch).length} fotos`;
+  }
+  if (component.type === "corridor") {
+    if (component.path.length < 2) return `${num(component.altitude)} m · sin línea`;
+    const length = Geo.pathLength(component.path);
+    const passes = CorridorPlanner.passCount(component.width, CorridorPlanner.spacing(component).line);
+    return [
+      `${num(component.altitude)} m`,
+      length >= 1000 ? `${num(length / 1000, 2)} km` : `${num(length)} m`,
+      `${num(component.width)} m de ancho`,
+      `${passes} ${passes === 1 ? "pasada" : "pasadas"}`,
+    ].join(" · ");
   }
   if (component.type === "map") {
     if (component.boundary.length < 3) return `${num(component.altitude)} m · sin área`;

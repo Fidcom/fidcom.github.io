@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CorridorPlanner,
   Geo,
   MapPlanner,
   MINI_4_PRO,
@@ -15,6 +16,7 @@ import {
   copyComponent,
   endAltitude,
   isKnown,
+  newCorridorComponent,
   newMapComponent,
   newOrbitComponent,
   newPanoComponent,
@@ -331,7 +333,7 @@ const pointsFixture = {
     },
     { id: "b", type: "photo", altitude: 20, position: [18.1808, -65.8188], heading: 180, gimbalPitch: -60, photoType: "aeb3" },
     { id: "c", type: "pano", altitude: 45, position: [18.1812, -65.8193], panoType: "wide", heading: 30, gimbalPitch: -20 },
-    { id: "d", type: "corridor", name: "Futuro", altitude: 35, width: 40 },
+    { id: "d", type: "facade", name: "Futuro", altitude: 35, width: 40 },
   ],
 };
 
@@ -394,11 +396,11 @@ test("un componente de una versión más nueva se guarda tal cual y no se vuela"
   const future = plan.components[3];
   assert.equal(isKnown(future), false);
   assert.equal(componentName(future), "Futuro");
-  assert.equal(componentName({ ...future, name: undefined }), "Componente nuevo (corridor)");
+  assert.equal(componentName({ ...future, name: undefined }), "Componente nuevo (facade)");
   future.name = "Río";
   future.enabled = false;
   const saved = JSON.parse(serializePlan(plan)).components[3];
-  assert.deepEqual(saved, { id: "d", type: "corridor", name: "Río", altitude: 35, width: 40, enabled: false });
+  assert.deepEqual(saved, { id: "d", type: "facade", name: "Río", altitude: 35, width: 40, enabled: false });
 });
 
 test("waypoints, foto y panorámica: duplicar, despegue automático y encuadre", () => {
@@ -413,4 +415,98 @@ test("waypoints, foto y panorámica: duplicar, despegue automático y encuadre",
   near(pr.toLocal(takeoffOf(newPlan("x", [waypoints]))).y, -40, 0.5);
   assert.deepEqual(componentPoints(photo), [origin]);
   assert.equal(componentPoints(newPanoComponent()).length, 0);
+});
+
+// ---- Corredor ----
+
+const corridorFixture = {
+  id: "corridor-test",
+  name: "Río",
+  finishAction: "GO_HOME",
+  takeoff: [18.1835, -65.817],
+  components: [
+    {
+      id: "r",
+      type: "corridor",
+      altitude: 35,
+      path: [
+        [18.18, -65.82],
+        [18.1818, -65.82],
+        [18.1818, -65.8186],
+        [18.183, -65.8175],
+      ],
+      width: 60,
+      minPhotoInterval: 2,
+      captureSpeed: 1,
+      photoType: "aeb3",
+    },
+  ],
+};
+
+test("corredor: las mismas pasadas, tiempo y fotos que en el teléfono", () => {
+  const plan = normalizePlan(structuredClone(corridorFixture));
+  const result = PlanPlanner.plan(plan);
+  const corridor = result.items[0].result;
+  // Los números que da PlanPlanner.kt con esta misma misión.
+  assert.equal(corridor.passes.length, 4);
+  assert.deepEqual(corridor.passes.map((p) => p.length), [4, 4, 4, 4]);
+  near(corridor.lineSpacing, 15.078125, 1e-6);
+  near(corridor.photoSpacing, 9.427083, 1e-6);
+  near(corridor.speed, 4.713542, 1e-6);
+  assert.equal(corridor.positions, 225);
+  assert.equal(corridor.photoCount, 675);
+  near(corridor.lengthMeters, 2145.1589, 0.01);
+  near(corridor.durationSeconds, 920.879, 0.01);
+  near(corridor.centerMeters, 524.9938, 0.01);
+  // Empieza en el extremo más cerca del despegue.
+  near(corridor.path[0][0], 18.1828666, 1e-6);
+  near(corridor.path[0][1], -65.8173387, 1e-6);
+  near(result.durationSeconds, 964.1977, 0.01);
+  near(result.lengthMeters, 2305.042, 0.01);
+  assert.equal(CorridorPlanner.outline(plan.components[0]).length, 8);
+  // Con ancho 0 y video, una sola pasada por la línea.
+  const line = CorridorPlanner.plan({ ...plan.components[0], width: 0, captureMode: "video" });
+  assert.equal(line.passes.length, 1);
+  near(line.durationSeconds, 77.6242, 0.01);
+  assert.equal(line.photoCount, 0);
+  assert.deepEqual(CorridorPlanner.outline({ ...plan.components[0], width: 0 }), []);
+});
+
+test("corredor: las esquinas guardan la distancia y por dentro no hacen rizos", () => {
+  const close = (points, expected) =>
+    expected.forEach((e, i) => assert.ok(Math.hypot(points[i].x - e.x, points[i].y - e.y) < 1e-6, JSON.stringify(points)));
+  const line = [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100, y: 100 }];
+  close(CorridorPlanner.offset(line, 10), [{ x: 10, y: 0 }, { x: 10, y: 90 }, { x: 100, y: 90 }]);
+  close(CorridorPlanner.offset(line, -10), [{ x: -10, y: 0 }, { x: -10, y: 110 }, { x: 100, y: 110 }]);
+  // Una vuelta de 150°: por fuera se corta la punta.
+  assert.equal(CorridorPlanner.offset([{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 50, y: 13.4 }], -10).length, 4);
+  // Dos giros de 60° con un tramo de 4 m: por dentro ese tramo se quita.
+  const p1 = { x: 0, y: 100 };
+  const p2 = { x: 4 * Math.sin(Math.PI / 3), y: 100 + 4 * Math.cos(Math.PI / 3) };
+  const p3 = { x: p2.x + 100 * Math.sin((2 * Math.PI) / 3), y: p2.y + 100 * Math.cos((2 * Math.PI) / 3) };
+  assert.equal(CorridorPlanner.offset([{ x: 0, y: 0 }, p1, p2, p3], 20).length, 3);
+});
+
+test("corredor: se guarda y se lee igual, y lo que falta toma el valor por defecto", () => {
+  const corridor = { ...newCorridorComponent([origin, pr.toGeo({ x: 0, y: 200 })]), width: 65, captureSpeed: 0, photoType: "aeb3" };
+  const plan = newPlan("Río", [corridor]);
+  const text = serializePlan(plan);
+  assert.ok(!text.includes("null"));
+  assert.deepEqual(normalizePlan(JSON.parse(text)), plan);
+  const bare = normalizePlan({ id: "x", components: [{ id: "c", type: "corridor", path: [origin, [18.2, -65.8], "malo"] }] }).components[0];
+  assert.equal(bare.width, 40);
+  assert.equal(bare.captureMode, "photo");
+  assert.equal(bare.path.length, 2);
+  assert.equal(bare.captureSpeed, null);
+});
+
+test("corredor: duplicar, despegue automático y encuadre", () => {
+  const corridor = newCorridorComponent([origin, pr.toGeo({ x: 0, y: 200 }), pr.toGeo({ x: 100, y: 200 })]);
+  // Mide 100 m de este a oeste y 40 m de ancho: la copia queda 150 m al este.
+  near(pr.toLocal(copyComponent(corridor).path[0]).x, 150, 0.5);
+  // El despegue automático va 20 m al sur de la franja, que empieza en el origen.
+  near(pr.toLocal(takeoffOf(newPlan("x", [corridor]))).y, -20, 0.5);
+  assert.equal(componentPoints(corridor).length, 6);
+  assert.deepEqual(componentPoints(newCorridorComponent([origin])), [origin]);
+  assert.equal(componentName(corridor), "Corredor");
 });
