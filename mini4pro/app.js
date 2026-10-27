@@ -31,6 +31,7 @@ import {
   newMapMission,
   newOrbitMission,
   normalizeMission,
+  LOCALE,
   num,
   parseKml,
   summary,
@@ -222,7 +223,7 @@ function startMarker(at, label) {
 
 // ---------- Lista ----------
 
-const relative = new Intl.RelativeTimeFormat("es", { numeric: "auto" });
+const relative = new Intl.RelativeTimeFormat(LOCALE, { numeric: "auto" });
 
 function whenText(time) {
   const minutes = Math.round((time - Date.now()) / 60000);
@@ -230,7 +231,7 @@ function whenText(time) {
   if (minutes > -60) return `Editada ${relative.format(minutes, "minute")}`;
   const hours = Math.round(minutes / 60);
   if (hours > -24) return `Editada ${relative.format(hours, "hour")}`;
-  return `Editada el ${new Date(time).toLocaleDateString("es", { day: "numeric", month: "short", year: "numeric" })}`;
+  return `Editada el ${new Date(time).toLocaleDateString(LOCALE, { day: "numeric", month: "short", year: "numeric" })}`;
 }
 
 function sortedMissions() {
@@ -565,7 +566,7 @@ function drawOrbitHandles() {
 
 const helpUpdaters = [];
 const fieldSetters = {};
-const fmt = (value, decimals) => value.toLocaleString("es", { maximumFractionDigits: decimals, useGrouping: false });
+const fmt = (value, decimals) => value.toLocaleString(LOCALE, { maximumFractionDigits: decimals, useGrouping: false });
 const parse = (text) => {
   const value = Number(String(text).trim().replace(",", "."));
   return text.trim() === "" || !Number.isFinite(value) ? null : value;
@@ -1273,7 +1274,7 @@ setBase(baseLayers[storage.get(BASE_KEY)] ? storage.get(BASE_KEY) : "bing");
 setLabels(storage.get(LABELS_KEY) !== "0");
 
 document.addEventListener("keydown", (event) => {
-  const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
   const mod = event.ctrlKey || event.metaKey;
   if (mod && !typing && event.key.toLowerCase() === "z") {
     event.preventDefault();
@@ -1282,6 +1283,8 @@ document.addEventListener("keydown", (event) => {
   } else if (mod && !typing && event.key.toLowerCase() === "y") {
     event.preventDefault();
     redo();
+  } else if (event.key === "Escape" && !$("layer-menu").hidden) {
+    $("layer-menu").hidden = true;
   } else if (event.key === "Escape" && !typing && current && !$("sync-dialog").open) {
     closeEditor();
   }
