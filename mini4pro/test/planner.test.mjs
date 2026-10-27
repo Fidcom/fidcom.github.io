@@ -2,7 +2,22 @@
 // Correr con: node --test mini4pro/test/planner.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Geo, MapPlanner, MINI_4_PRO, MINI_4_PRO_12MP, OrbitPlanner, newMapMission, newOrbitMission, normalizeMission, parseKml, projection } from "../planner.js";
+import {
+  Geo,
+  MapPlanner,
+  MINI_4_PRO,
+  MINI_4_PRO_12MP,
+  OrbitPlanner,
+  PlanPlanner,
+  newMapComponent,
+  newOrbitComponent,
+  newPlan,
+  normalizePlan,
+  parseKml,
+  projection,
+  serializePlan,
+  takeoffOf,
+} from "../planner.js";
 
 const near = (actual, expected, tolerance, message) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${message ?? ""} esperado ${expected} ± ${tolerance}, salió ${actual}`);
@@ -15,7 +30,7 @@ const square = [
   { x: 100, y: 100 },
   { x: 0, y: 100 },
 ].map(pr.toGeo);
-const map = (fields) => ({ ...newMapMission(), boundary: square, ...fields });
+const map = (fields) => ({ ...newMapComponent(), boundary: square, ...fields });
 
 test("GSD igual a Dronelink a 10 m", () => near(MapPlanner.gsd(MINI_4_PRO, 10), 0.18, 0.005));
 
@@ -103,28 +118,103 @@ test("AEB 3 guarda tres fotos por punto y frenar alarga el vuelo", () => {
 });
 
 test("la órbita empieza en el rumbo indicado", () => {
-  const plan = OrbitPlanner.plan({ ...newOrbitMission(), center: origin, radius: 30, startBearing: 90 });
+  const plan = OrbitPlanner.plan({ ...newOrbitComponent(), center: origin, radius: 30, startBearing: 90 });
   const start = pr.toLocal(plan.start);
   near(start.x, 30, 0.01);
   near(start.y, 0, 0.01);
 });
 
 test("con punto de interés el gimbal apunta a él", () => {
-  near(OrbitPlanner.gimbalPitch({ ...newOrbitMission(), altitude: 30, radius: 30, poiAltitude: 0 }), -45, 0.01);
-  near(OrbitPlanner.gimbalPitch({ ...newOrbitMission(), gimbalPitch: -10 }), -10, 0.01);
+  near(OrbitPlanner.gimbalPitch({ ...newOrbitComponent(), altitude: 30, radius: 30, poiAltitude: 0 }), -45, 0.01);
+  near(OrbitPlanner.gimbalPitch({ ...newOrbitComponent(), gimbalPitch: -10 }), -10, 0.01);
 });
 
 test("órbitas del formato anterior: photoInterval null es sin fotos", () => {
   const old = { version: 1, id: "a", type: "orbit", name: "x", center: origin, photoInterval: null };
-  assert.equal(normalizeMission(old).captureMode, "none");
-  const withPhotos = normalizeMission({ ...old, photoInterval: 2 });
+  const orbit = (json) => normalizePlan(json).components[0];
+  assert.equal(orbit(old).captureMode, "none");
+  const withPhotos = orbit({ ...old, photoInterval: 2 });
   assert.equal(withPhotos.captureMode, "photo");
   assert.equal(withPhotos.photoInterval, 2);
-  assert.equal(normalizeMission({ ...old, heading: "raro" }).heading, "center");
+  assert.equal(orbit({ ...old, heading: "raro" }).heading, "center");
+});
+
+test("una misión v1 se vuelve un plan de un componente", () => {
+  const old = { version: 1, id: "m1", type: "map", name: "Finca", updatedAt: 5, finishAction: "LAND", boundary: square, altitude: 40 };
+  const plan = normalizePlan(old);
+  assert.equal(plan.version, 2);
+  assert.equal(plan.id, "m1");
+  assert.equal(plan.name, "Finca");
+  assert.equal(plan.updatedAt, 5);
+  assert.equal(plan.finishAction, "LAND");
+  assert.equal(plan.takeoff, null);
+  assert.equal(plan.components.length, 1);
+  const [map] = plan.components;
+  assert.equal(map.id, "c1");
+  assert.equal(map.type, "map");
+  assert.equal(map.altitude, 40);
+  assert.equal(map.enabled, true);
+  assert.equal("finishAction" in map, false);
+  // Una órbita v1 sin startBearing seguía empezando al sur.
+  const orbit = normalizePlan({ version: 1, id: "o", type: "orbit", name: "o", center: origin }).components[0];
+  assert.equal(orbit.startBearing, 180);
+  assert.equal(normalizePlan({ version: 1, id: "o", type: "orbit", name: "o" }).finishAction, "HOVER");
+});
+
+test("un plan v2 se lee igual que se guarda y sin campos vacíos", () => {
+  const plan = newPlan("Humacao", [{ ...newMapComponent(square), altitude: 10 }, newOrbitComponent(origin)]);
+  const text = serializePlan(plan);
+  assert.equal(text.includes("null"), false);
+  assert.deepEqual(normalizePlan(JSON.parse(text)), plan);
+});
+
+test("los componentes se encadenan: la órbita empieza donde está más cerca del fin del mapa", () => {
+  const center = pr.toGeo({ x: 50, y: 250 });
+  const plan = newPlan("p", [{ ...newMapComponent(square), altitude: 30 }, { ...newOrbitComponent(center), radius: 40 }]);
+  const result = PlanPlanner.plan(plan);
+  const [map, orbit] = result.items;
+  const mapEnd = map.result.path.at(-1);
+  near(orbit.result.startBearing, Geo.bearing(center, mapEnd), 0.01);
+  near(Geo.distance(orbit.result.start, mapEnd), Geo.distance(center, mapEnd) - 40, 0.5);
+  // Despegue → mapa, mapa → órbita y regreso a casa.
+  assert.deepEqual(result.transits.map((t) => t.kind), ["takeoff", "between", "home"]);
+  assert.deepEqual(result.transits[1].from, mapEnd);
+  assert.deepEqual(result.transits[1].to, orbit.result.start);
+  const parts = map.result.durationSeconds + orbit.result.durationSeconds + result.transits.reduce((s, t) => s + t.durationSeconds, 0);
+  near(result.durationSeconds, parts, 0.001);
+});
+
+test("el despegue automático va al sur del primer componente y el mapa empieza en la esquina más cercana", () => {
+  const plan = newPlan("p", [{ ...newMapComponent(square), altitude: 30 }]);
+  const auto = pr.toLocal(takeoffOf(plan));
+  near(auto.x, 50, 0.01);
+  near(auto.y, -20, 0.01);
+  const start = pr.toLocal(PlanPlanner.plan(plan).items[0].result.path[0]);
+  assert.ok(start.y < 1, `empieza en el lado sur (y = ${start.y})`);
+  const orbitPlan = newPlan("o", [{ ...newOrbitComponent(origin), radius: 30 }]);
+  near(pr.toLocal(takeoffOf(orbitPlan)).y, -50, 0.01);
+  near(PlanPlanner.plan(orbitPlan).items[0].result.startBearing, 180, 0.01);
+  plan.takeoff = pr.toGeo({ x: 120, y: 120 });
+  const ne = PlanPlanner.plan(plan).items[0].result.path[0];
+  assert.ok(Geo.distance(ne, pr.toGeo({ x: 100, y: 100 })) < 15, `empieza a ${Geo.distance(ne, pr.toGeo({ x: 100, y: 100 }))} m de la esquina`);
+});
+
+test("un componente apagado no se vuela", () => {
+  const plan = newPlan("p", [{ ...newMapComponent(square), enabled: false }, newOrbitComponent(pr.toGeo({ x: 300, y: 0 }))]);
+  const result = PlanPlanner.plan(plan);
+  assert.equal(result.flown, 1);
+  near(result.durationSeconds - result.transits.reduce((s, t) => s + t.durationSeconds, 0), result.items[1].result.durationSeconds, 0.001);
+  assert.equal(result.photoCount, result.items[1].result.photoCount);
+});
+
+test("mover un área desde el centro no la deforma", () => {
+  const moved = Geo.translate(square, Geo.centroid(square), pr.toGeo({ x: 500, y: 800 }));
+  near(Geo.area(moved), Geo.area(square), 1);
+  near(Geo.distance(Geo.centroid(moved), pr.toGeo({ x: 500, y: 800 })), 0, 0.5);
 });
 
 test("la órbita empieza al sur y cierra el círculo", () => {
-  const plan = OrbitPlanner.plan({ ...newOrbitMission(), center: origin, radius: 30 });
+  const plan = OrbitPlanner.plan({ ...newOrbitComponent(), center: origin, radius: 30 });
   const start = pr.toLocal(plan.start);
   near(start.x, 0, 0.01);
   near(start.y, -30, 0.01);
@@ -135,7 +225,7 @@ test("la órbita empieza al sur y cierra el círculo", () => {
 });
 
 test("en sentido horario va primero al oeste", () => {
-  const plan = OrbitPlanner.plan({ ...newOrbitMission(), center: origin, radius: 30, clockwise: true });
+  const plan = OrbitPlanner.plan({ ...newOrbitComponent(), center: origin, radius: 30, clockwise: true });
   assert.ok(pr.toLocal(plan.path[1]).x < 0);
 });
 

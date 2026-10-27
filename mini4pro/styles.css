@@ -114,13 +114,158 @@ button {
   border-color: var(--warn);
 }
 
+/* Punto medio de cada lado, con un + azul como en Dronelink: agrega una esquina. */
 .mid-handle {
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.55);
-  border: 2px solid rgba(47, 155, 255, 0.9);
+  background: #fff;
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   cursor: copy;
+  opacity: 0.9;
+}
+
+.mid-handle:hover {
+  opacity: 1;
+  transform: scale(1.15);
+}
+
+/* Centro del área: se arrastra para mover el área entera. */
+.move-handle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(16, 20, 24, 0.75);
+  border: 2px solid #fff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+  cursor: move;
+}
+
+.move-handle svg {
+  width: 18px;
+  height: 18px;
+  fill: #fff;
+}
+
+.move-handle:hover,
+.orbit-center:hover {
+  transform: scale(1.1);
+}
+
+/* Centro de la órbita: verde, con el ícono de órbita, como en Dronelink. */
+.orbit-center {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #12b76a;
+  border: 3px solid #fff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 0 0 7px rgba(18, 183, 106, 0.3), 0 1px 6px rgba(0, 0, 0, 0.5);
+  cursor: move;
+}
+
+.orbit-center svg {
+  width: 18px;
+  height: 18px;
+  fill: #fff;
+}
+
+/* Pines: azul con el número del componente donde empieza; morado con H en el despegue. */
+.pin {
+  position: relative;
+  width: 28px;
+  height: 36px;
+}
+
+.pin svg {
+  /* Leaflet pone z-index: 200 a los svg del mapa; el número tiene que quedar encima. */
+  position: relative;
+  z-index: 0;
+  width: 28px;
+  height: 36px;
+  fill: #2f7cf6;
+  stroke: #fff;
+  stroke-width: 2;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.5));
+}
+
+.pin.takeoff svg {
+  fill: #7c3aed;
+}
+
+.pin.off svg {
+  fill: #8a939b;
+}
+
+.pin.draggable {
+  cursor: grab;
+}
+
+.pin.draggable:hover svg {
+  transform: scale(1.08);
+  transform-origin: 50% 100%;
+}
+
+.pin-text {
+  position: absolute;
+  z-index: 1;
+  top: 6px;
+  left: 0;
+  width: 28px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  pointer-events: none;
+}
+
+.pin-halo {
+  position: absolute;
+  left: 14px;
+  top: 36px;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #3ddc84 0 4px, rgba(61, 220, 132, 0.35) 5px);
+  pointer-events: none;
+}
+
+.pin.takeoff .pin-halo {
+  background: radial-gradient(circle, #a78bfa 0 4px, rgba(124, 58, 237, 0.3) 5px);
+}
+
+.pin-label,
+.end-label {
+  position: absolute;
+  z-index: 1;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  pointer-events: none;
+}
+
+.pin-label {
+  left: 14px;
+  top: 41px;
+  transform: translateX(-50%);
+}
+
+.end-label {
+  left: 15px;
+  top: -2px;
 }
 
 .radius-handle {
@@ -133,43 +278,6 @@ button {
   cursor: ew-resize;
 }
 
-.start-dot {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--ok);
-  border: 3px solid #fff;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
-}
-
-/* Etiqueta de Inicio en el editor de mapas: se arrastra a otra esquina para empezar por ahí. */
-.start-handle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 22px;
-  padding: 0 7px 0 5px;
-  border-radius: 7px;
-  background: rgba(0, 0, 0, 0.7);
-  border: 1px solid var(--ok);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: grab;
-}
-
-.start-handle::before {
-  content: "";
-  width: 6px;
-  height: 10px;
-  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.8) 1px, transparent 1.5px);
-  background-size: 3px 3.4px;
-}
-
-.start-handle:hover {
-  background: rgba(61, 220, 132, 0.3);
-}
-
 .end-dot {
   width: 12px;
   height: 12px;
@@ -177,18 +285,6 @@ button {
   background: var(--danger);
   border: 2px solid #fff;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
-}
-
-.start-label {
-  position: absolute;
-  left: 20px;
-  top: -3px;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.6);
 }
 
 .mission-tooltip {
@@ -797,6 +893,215 @@ button {
   border-top: 1px solid var(--stroke);
   margin: 0 -18px;
   padding-left: 18px;
+}
+
+/* ---------- Componentes del plan ---------- */
+
+.type-icon.plan {
+  color: #a78bfa;
+}
+
+.component-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 10px 10px 12px;
+  margin-top: 8px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--card);
+  text-align: left;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.component-card:hover {
+  background: var(--card-hover);
+  border-color: rgba(47, 155, 255, 0.4);
+}
+
+.component-card .body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.component-card .name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.component-card .meta {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.component-card.off .name,
+.component-card.off .meta {
+  color: var(--text-3);
+}
+
+.component-card .chevron {
+  color: var(--text-3);
+}
+
+.component-icon {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.component-card.off .component-icon,
+.component-icon.off {
+  background: #5d666e;
+}
+
+.component-icon .n {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #12b76a;
+  border: 2px solid var(--panel-solid);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
+
+.component-icon.small {
+  width: 32px;
+  height: 32px;
+  margin: 0 4px 0 2px;
+}
+
+.component-icon.small svg {
+  width: 18px;
+  height: 18px;
+}
+
+.add-button {
+  margin-top: 10px;
+}
+
+.add-menu {
+  margin-top: 6px;
+  padding: 6px;
+  background: var(--panel-solid);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.add-menu button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+}
+
+.add-menu button:hover {
+  background: var(--card-hover);
+}
+
+.add-menu button svg {
+  color: var(--accent);
+}
+
+.add-menu b {
+  display: block;
+  font-weight: 600;
+}
+
+.add-menu small {
+  display: block;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.component-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 8px 0 0 -6px;
+}
+
+.component-actions .icon-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+  background: transparent;
+}
+
+.component-actions .icon-button.active {
+  color: var(--warn);
+}
+
+.off-note {
+  margin-left: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.estimate {
+  margin-top: 8px;
+  border-radius: 12px;
+  background: var(--card);
+  padding: 4px 12px;
+}
+
+.estimate-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--stroke);
+  font-size: 13px;
+}
+
+.estimate-row:last-child {
+  border-bottom: none;
+}
+
+.estimate-row .label {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.estimate-row.transit .label {
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.estimate-row .dist {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.estimate-row .time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  min-width: 64px;
+  text-align: right;
+}
+
+.estimate .section-note {
+  margin: 8px 0;
 }
 
 /* ---------- Herramientas del mapa ---------- */

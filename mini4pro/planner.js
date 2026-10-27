@@ -214,6 +214,13 @@ export const Geo = {
     return Math.abs(sum) / 2;
   },
 
+  /** Mueve los puntos como un bloque, de `from` a `to`, sin deformarlos. */
+  translate(points, from, to) {
+    const a = projection(from);
+    const b = projection(to);
+    return points.map((p) => b.toGeo(a.toLocal(p)));
+  },
+
   pathLength(path) {
     let total = 0;
     for (let i = 1; i < path.length; i++) total += Geo.distance(path[i - 1], path[i]);
@@ -279,7 +286,8 @@ export const MapPlanner = {
     };
   },
 
-  plan(mission) {
+  /** `from`: de dónde viene el dron (despegue o fin del componente anterior), para empezar cerca. */
+  plan(mission, from = null) {
     const camera = cameraFor(mission);
     const photos = mission.captureMode === "photo";
     const directions = mission.pattern === "grid" ? [mission.direction, mission.direction + 90] : [mission.direction];
@@ -293,9 +301,10 @@ export const MapPlanner = {
     if (mission.boundary.length >= 3) {
       directions.forEach((direction, pass) => {
         let passLegs = MapPlanner.gridLegs(mission.boundary, direction, spacings[pass].line);
-        // La primera pasada empieza donde se puso el inicio; la segunda, cerca de donde acabó la primera.
-        const from = pass === 0 ? mission.start : legs.at(-1)?.end;
-        if (from) passLegs = startNearest(from, passLegs);
+        // La primera pasada empieza donde se puso el inicio (o lo más cerca de donde viene el dron);
+        // la segunda, cerca de donde acabó la primera.
+        const near = pass === 0 ? (mission.start ?? from) : legs.at(-1)?.end;
+        if (near) passLegs = startNearest(near, passLegs);
         positions += passLegs.reduce((sum, leg) => sum + Math.floor(Geo.distance(leg.start, leg.end) / spacings[pass].photo) + 1, 0);
         legs = legs.concat(passLegs);
       });
@@ -413,9 +422,20 @@ function extendLeg(leg, meters) {
 }
 
 export const OrbitPlanner = {
-  plan(mission) {
+  /**
+   * Rumbo desde el centro donde empieza: el que se escogió, o el punto del círculo más cercano a
+   * `from` (de donde viene el dron). Sin ninguno de los dos, al sur.
+   */
+  startBearing(mission, from = null) {
+    if (mission.startBearing !== null && mission.startBearing !== undefined) return mission.startBearing;
+    if (from && mission.center && Geo.distance(mission.center, from) > 1) return Geo.bearing(mission.center, from);
+    return 180;
+  },
+
+  plan(mission, from = null) {
     if (!mission.center) return null;
     const pr = projection(mission.center);
+    const startBearing = OrbitPlanner.startBearing(mission, from);
     const totalDegrees = 360 * mission.rotations;
     const steps = Math.max(8, Math.trunc(totalDegrees / 5));
     const startRadius = mission.radius;
@@ -426,7 +446,7 @@ export const OrbitPlanner = {
       const f = i / steps;
       const r = startRadius + (endRadius - startRadius) * f;
       // Empieza en el rumbo startBearing desde el centro (180 = al sur); el ángulo es un rumbo (0 = norte).
-      const b = rad(mission.startBearing + sign * totalDegrees * f);
+      const b = rad(startBearing + sign * totalDegrees * f);
       path.push(pr.toGeo({ x: r * Math.sin(b), y: r * Math.cos(b) }));
     }
     const horizontal = Geo.pathLength(path);
@@ -434,7 +454,7 @@ export const OrbitPlanner = {
     const length = Math.sqrt(horizontal ** 2 + climb ** 2);
     const duration = length / Math.max(0.5, mission.speed);
     const photoCount = mission.captureMode === "photo" ? Math.floor(duration / mission.photoInterval) + 1 : 0;
-    return { path, start: path[0], lengthMeters: length, durationSeconds: duration, photoCount };
+    return { path, start: path[0], startBearing, lengthMeters: length, durationSeconds: duration, photoCount };
   },
 
   /** Inclinación del gimbal: apunta al punto de interés si lo hay; si no, la fija. */
@@ -447,7 +467,13 @@ export const OrbitPlanner = {
   angularSpeed: (radius, speed) => (speed / (2 * Math.PI * radius)) * 360,
 };
 
-// ---- Misiones (formato JSON v1, igual que MissionJson.kt) ----
+// ---- Planes (formato JSON v2, igual que MissionJson.kt) ----
+// Una misión es un plan con varios componentes en fila (mapas y órbitas), como en Dronelink:
+// el dron despega, vuela cada componente empezando cerca de donde terminó el anterior y al final
+// hace lo que diga finishAction.
+
+/** Subida y bajada entre componentes, en m/s (los límites de Dronelink). */
+export const VERTICAL_SPEED = 3;
 
 const uuid = () =>
   globalThis.crypto?.randomUUID?.() ??
@@ -456,15 +482,29 @@ const uuid = () =>
     return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
   });
 
-export function newMapMission(name = "Mapa", boundary = []) {
+/** Identificador corto de un componente; solo tiene que ser único dentro de su plan. */
+const componentId = () => `c${Math.random().toString(36).slice(2, 10)}`;
+
+export function newPlan(name = "Misión", components = []) {
   return {
-    version: 1,
+    version: 2,
     id: uuid(),
-    type: "map",
     name,
     updatedAt: Date.now(),
-    altitude: 30,
     finishAction: "GO_HOME",
+    takeoff: null,
+    transitSpeed: 8,
+    components,
+  };
+}
+
+export function newMapComponent(boundary = []) {
+  return {
+    id: componentId(),
+    type: "map",
+    name: null,
+    enabled: true,
+    altitude: 30,
     boundary,
     frontOverlap: 75,
     sideOverlap: 70,
@@ -495,22 +535,21 @@ function emptyCameraSettings() {
   return Object.fromEntries(CAMERA_SETTING_KEYS.map((key) => [key, null]));
 }
 
-export function newOrbitMission(name = "Órbita") {
+export function newOrbitComponent(center = null) {
   return {
-    version: 1,
-    id: uuid(),
+    id: componentId(),
     type: "orbit",
-    name,
-    updatedAt: Date.now(),
+    name: null,
+    enabled: true,
     altitude: 20,
-    finishAction: "HOVER",
-    center: null,
+    center,
     radius: 30,
     finalAltitude: null,
     finalRadius: null,
     clockwise: true,
     rotations: 1,
-    startBearing: 180,
+    // null = empieza en el punto del círculo más cercano a donde viene el dron.
+    startBearing: null,
     speed: 4,
     heading: "center",
     headingAngle: 0,
@@ -523,15 +562,17 @@ export function newOrbitMission(name = "Órbita") {
   };
 }
 
-/** Completa una misión leída de un archivo con los valores por defecto, como fromJson en Kotlin. */
-export function normalizeMission(json) {
-  const base = json.type === "orbit" ? newOrbitMission() : newMapMission();
-  const mission = { ...base, ...json, version: 1 };
-  if (!FINISH_ACTIONS.some(([key]) => key === mission.finishAction)) mission.finishAction = base.finishAction;
-  if (mission.type === "orbit" && json.captureMode === undefined) {
+/** Completa un componente leído de un archivo con los valores por defecto, como en Kotlin. */
+export function normalizeComponent(json) {
+  const base = json.type === "orbit" ? newOrbitComponent() : newMapComponent();
+  const component = { ...base, ...json, type: base.type };
+  if (typeof component.id !== "string" || !component.id) component.id = base.id;
+  if (typeof component.name !== "string" || !component.name.trim()) component.name = null;
+  component.enabled = component.enabled !== false;
+  if (component.type === "orbit" && json.captureMode === undefined) {
     // Formato anterior: photoInterval null quería decir "sin fotos".
-    mission.captureMode = json.photoInterval ? "photo" : "none";
-    mission.photoInterval = json.photoInterval || base.photoInterval;
+    component.captureMode = json.photoInterval ? "photo" : "none";
+    component.photoInterval = json.photoInterval || base.photoInterval;
   }
   // Un valor desconocido (de otra versión) vuelve al valor por defecto.
   const choices = {
@@ -541,27 +582,176 @@ export function normalizeMission(json) {
     capturePriority: CAPTURE_PRIORITIES,
     photoType: PHOTO_TYPES,
     spacing: SPACING_MODES,
-    heading: mission.type === "map" ? MAP_HEADINGS : ORBIT_HEADINGS,
+    heading: component.type === "map" ? MAP_HEADINGS : ORBIT_HEADINGS,
     headingReference: HEADING_REFERENCES,
   };
   for (const [key, options] of Object.entries(choices)) {
-    if (key in base && !options.some(([value]) => value === mission[key])) mission[key] = base[key];
+    if (key in base && !options.some(([value]) => value === component[key])) component[key] = base[key];
   }
-  return mission;
+  // Los campos de la misión entera no van dentro del componente.
+  for (const key of ["version", "updatedAt", "finishAction"]) delete component[key];
+  return component;
+}
+
+const isPoint = (p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite);
+
+/**
+ * Lee un plan guardado. Las misiones del formato anterior (v1: un solo mapa u órbita) se
+ * convierten en un plan con ese único componente, igual que en el teléfono.
+ */
+export function normalizePlan(json) {
+  if (!Array.isArray(json.components)) {
+    const { version, id, name, updatedAt, finishAction, ...rest } = json;
+    // En v1 la órbita siempre empezaba al sur si no decía otra cosa.
+    const component = rest.type === "orbit" ? { ...rest, startBearing: rest.startBearing ?? 180 } : rest;
+    json = {
+      id,
+      name,
+      updatedAt,
+      finishAction: finishAction ?? (rest.type === "orbit" ? "HOVER" : "GO_HOME"),
+      components: [{ ...component, id: "c1" }],
+    };
+  }
+  const base = newPlan();
+  const plan = { ...base, ...json, version: 2 };
+  if (typeof plan.id !== "string" || !plan.id) plan.id = base.id;
+  if (typeof plan.name !== "string" || !plan.name.trim()) plan.name = base.name;
+  if (!Number.isFinite(plan.updatedAt)) plan.updatedAt = base.updatedAt;
+  if (!FINISH_ACTIONS.some(([key]) => key === plan.finishAction)) plan.finishAction = base.finishAction;
+  if (!isPoint(plan.takeoff)) plan.takeoff = null;
+  if (!Number.isFinite(plan.transitSpeed) || plan.transitSpeed <= 0) plan.transitSpeed = base.transitSpeed;
+  const seen = new Set();
+  plan.components = json.components
+    .filter((c) => c && typeof c === "object")
+    .map((c) => {
+      const component = normalizeComponent(c);
+      while (seen.has(component.id)) component.id = componentId();
+      seen.add(component.id);
+      return component;
+    });
+  return plan;
 }
 
 /** El JSON que se guarda: sin campos vacíos, igual que lo escribe el teléfono. */
-export function serializeMission(mission) {
-  const out = {};
-  for (const [key, value] of Object.entries(mission)) {
-    if (value !== null && value !== undefined) out[key] = value;
-  }
-  return JSON.stringify(out, null, 2) + "\n";
+export function serializePlan(plan) {
+  const compact = (object) => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== null && value !== undefined));
+  return JSON.stringify({ ...compact(plan), components: plan.components.map(compact) }, null, 2) + "\n";
 }
 
-export function geometry(mission) {
-  return mission.type === "map" ? mission.boundary : mission.center ? [mission.center] : [];
+/** Copia de un componente con otro identificador, para duplicarlo. */
+export function copyComponent(component) {
+  return { ...structuredClone(component), id: componentId() };
 }
+
+export const componentName = (component) => component.name || (component.type === "map" ? "Mapa" : "Órbita");
+
+/** Punto de referencia del componente: el centro del área o de la órbita. */
+export function anchorOf(component) {
+  if (component.type === "map") return component.boundary.length ? Geo.centroid(component.boundary) : null;
+  return component.center;
+}
+
+/** Sin marcarlo, el despegue va a esta distancia al sur del primer componente, para no tapar sus puntos. */
+const AUTO_TAKEOFF_METERS = 20;
+
+/** Despegue automático junto a un componente: al sur del área o de la órbita. */
+export function autoTakeoff(component) {
+  const anchor = anchorOf(component);
+  if (!anchor) return null;
+  const pr = projection(anchor);
+  if (component.type === "map") {
+    const south = Math.min(...component.boundary.map((p) => pr.toLocal(p).y));
+    return pr.toGeo({ x: 0, y: south - AUTO_TAKEOFF_METERS });
+  }
+  const radius = Math.max(component.radius, component.finalRadius ?? 0);
+  return pr.toGeo({ x: 0, y: -(radius + AUTO_TAKEOFF_METERS) });
+}
+
+/** Dónde despega el dron: el que se marcó, o junto al primer componente que se vuela. */
+export function takeoffOf(plan) {
+  if (plan.takeoff) return plan.takeoff;
+  const flown = plan.components.filter((c) => c.enabled);
+  for (const component of [...flown, ...plan.components]) {
+    const point = autoTakeoff(component);
+    if (point) return point;
+  }
+  return null;
+}
+
+export function componentPlan(component, from = null) {
+  return component.type === "map" ? MapPlanner.plan(component, from) : OrbitPlanner.plan(component, from);
+}
+
+/** Altura al terminar el componente (una espiral puede acabar más alta o más baja). */
+export const endAltitude = (component) => (component.type === "orbit" ? (component.finalAltitude ?? component.altitude) : component.altitude);
+
+export const PlanPlanner = {
+  /**
+   * Ruta completa del plan: cada componente con su ruta (empezando cerca de donde terminó el
+   * anterior), los tránsitos entre ellos y los totales.
+   */
+  plan(plan) {
+    const takeoff = takeoffOf(plan);
+    const items = [];
+    const transits = [];
+    let position = takeoff;
+    let altitude = 0;
+    let flown = 0;
+    let durationSeconds = 0;
+    let lengthMeters = 0;
+    let photoCount = 0;
+    const transit = (from, to, fromAltitude, toAltitude, kind) => {
+      const horizontal = Geo.distance(from, to);
+      const seconds = horizontal / plan.transitSpeed + Math.abs(toAltitude - fromAltitude) / VERTICAL_SPEED;
+      const t = { from, to, fromAltitude, toAltitude, kind, lengthMeters: horizontal, durationSeconds: seconds };
+      transits.push(t);
+      durationSeconds += seconds;
+      lengthMeters += horizontal;
+      return t;
+    };
+
+    plan.components.forEach((component, index) => {
+      const result = componentPlan(component, position);
+      // approach: el tránsito para llegar al inicio de este componente.
+      const item = { component, index, number: index + 1, result: result?.path.length ? result : null, approach: null };
+      items.push(item);
+      if (!component.enabled || !item.result) return;
+      const start = item.result.path[0];
+      if (position) item.approach = transit(position, start, altitude, component.altitude, flown === 0 ? "takeoff" : "between");
+      durationSeconds += item.result.durationSeconds;
+      lengthMeters += item.result.lengthMeters;
+      photoCount += item.result.photoCount;
+      position = item.result.path.at(-1);
+      altitude = endAltitude(component);
+      flown++;
+    });
+
+    let home = null;
+    let landingSeconds = 0;
+    if (flown > 0 && plan.finishAction === "GO_HOME" && takeoff) home = transit(position, takeoff, altitude, 0, "home");
+    if (flown > 0 && plan.finishAction === "LAND") {
+      landingSeconds = altitude / VERTICAL_SPEED;
+      durationSeconds += landingSeconds;
+    }
+    return { takeoff, items, transits, home, landingSeconds, flown, durationSeconds, lengthMeters, photoCount };
+  },
+};
+
+/** Todos los puntos del plan, para encuadrarlo en el mapa. */
+export function planPoints(plan) {
+  const points = [];
+  for (const component of plan.components) {
+    if (component.type === "map") points.push(...component.boundary);
+    else {
+      const orbit = OrbitPlanner.plan(component);
+      if (orbit) points.push(...orbit.path);
+    }
+  }
+  if (plan.takeoff) points.push(plan.takeoff);
+  return points;
+}
+
+export const hasGeometry = (plan) => plan.components.some((c) => anchorOf(c));
 
 // ---- Textos ----
 
@@ -573,19 +763,41 @@ export function formatDuration(seconds) {
 const num = (value, decimals = 0) =>
   value.toLocaleString(LOCALE, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
-export function summary(mission) {
-  if (mission.type === "map") {
-    const plan = MapPlanner.plan(mission);
-    if (plan.legs.length === 0) return `Mapa · ${num(mission.altitude)} m · sin área`;
-    const pattern = mission.pattern === "grid" ? " cruzadas" : "";
-    const capture = mission.captureMode === "photo" ? `${plan.photoCount} fotos` : mission.captureMode === "video" ? "video" : "sin captura";
-    return `${num(mission.altitude)} m · ${num(plan.areaHectares, 2)} ha · ${plan.legs.length} líneas${pattern} · ${capture} · ${formatDuration(plan.durationSeconds)}`;
+/** Resumen de un componente, como "10 m | 0.1 ha | Grid | 75% | 70%" en Dronelink. */
+export function componentSummary(component) {
+  if (component.type === "map") {
+    if (component.boundary.length < 3) return `${num(component.altitude)} m · sin área`;
+    const area = Geo.area(component.boundary) / 10000;
+    const pattern = component.pattern === "grid" ? "Cruzado" : "Normal";
+    const spacing =
+      component.spacing === "distance"
+        ? `${num(component.frontDistance, 1)} × ${num(component.sideDistance, 1)} m`
+        : `${num(component.frontOverlap)} % · ${num(component.sideOverlap)} %`;
+    return `${num(component.altitude)} m · ${num(area, 2)} ha · ${pattern} · ${spacing}`;
   }
-  const plan = OrbitPlanner.plan(mission);
-  const turns = mission.rotations === 1 ? "1 vuelta" : `${num(mission.rotations, 1)} vueltas`;
-  const dir = mission.clockwise ? "horario" : "antihorario";
-  if (!plan) return `Órbita · ${num(mission.altitude)} m · sin centro`;
-  return `${num(mission.altitude)} m · radio ${num(mission.radius)} m · ${turns} ${dir} · ${formatDuration(plan.durationSeconds)}`;
+  if (!component.center) return `${num(component.altitude)} m · sin centro`;
+  const altitude =
+    component.finalAltitude !== null && component.finalAltitude !== component.altitude
+      ? `${num(component.altitude)} → ${num(component.finalAltitude)} m`
+      : `${num(component.altitude)} m`;
+  const radius =
+    component.finalRadius !== null && component.finalRadius !== component.radius
+      ? `radio ${num(component.radius)} → ${num(component.finalRadius)} m`
+      : `radio ${num(component.radius)} m`;
+  return `${altitude} · ${num(component.rotations * 360)}° ${component.clockwise ? "horario" : "antihorario"} · ${radius}`;
+}
+
+/** Resumen del plan para la lista: componentes, duración y fotos. */
+export function summary(plan) {
+  const parts = [plan.components.length ? plan.components.map(componentName).join(" + ") : "Sin componentes"];
+  const result = PlanPlanner.plan(plan);
+  if (result.flown === 0) {
+    parts.push("sin área todavía");
+  } else {
+    parts.push(formatDuration(result.durationSeconds));
+    if (result.photoCount) parts.push(`${result.photoCount} fotos`);
+  }
+  return parts.join(" · ");
 }
 
 export { num };
