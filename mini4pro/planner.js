@@ -16,6 +16,12 @@ export const MINI_4_PRO = {
   imageHeightPx: 6048,
 };
 
+/** Patrón del mapa: líneas en una dirección, o cruzadas (dos pasadas a 90°) como "Grid" en Dronelink. */
+export const MAP_PATTERNS = [
+  ["normal", "Normal"],
+  ["grid", "Cruzado"],
+];
+
 export const FINISH_ACTIONS = [
   ["HOVER", "Quedarse en el aire"],
   ["GO_HOME", "Regresar a casa"],
@@ -109,7 +115,11 @@ export const MapPlanner = {
     const photoSpacing = Math.max(0.5, footHeight * (1 - mission.frontOverlap / 100));
     // La cámara no puede tomar fotos más rápido que minPhotoInterval.
     const speed = Math.max(0.5, Math.min(mission.maxSpeed, photoSpacing / mission.minPhotoInterval));
-    const legs = mission.boundary.length >= 3 ? MapPlanner.gridLegs(mission.boundary, mission.direction, lineSpacing) : [];
+    const first = mission.boundary.length >= 3 ? MapPlanner.gridLegs(mission.boundary, mission.direction, lineSpacing) : [];
+    const legs =
+      mission.pattern === "grid" && first.length > 0
+        ? [...first, ...continueFrom(first.at(-1).end, MapPlanner.gridLegs(mission.boundary, mission.direction + 90, lineSpacing))]
+        : first;
     const path = legs.flatMap((leg) => [leg.start, leg.end]);
     const length = Geo.pathLength(path);
     const photoCount = legs.reduce((s, leg) => s + Math.floor(Geo.distance(leg.start, leg.end) / photoSpacing) + 1, 0);
@@ -185,6 +195,19 @@ export const MapPlanner = {
   },
 };
 
+/**
+ * Ordena la segunda pasada del patrón cruzado para que empiece en la esquina más cercana a donde
+ * terminó la primera: puede recorrerse al derecho o al revés, y cada tramo en un sentido u otro.
+ */
+function continueFrom(point, legs) {
+  if (legs.length === 0) return legs;
+  const flipped = legs.map((leg) => ({ start: leg.end, end: leg.start }));
+  const options = [legs, flipped, [...legs].reverse(), [...flipped].reverse()];
+  return options.reduce((best, option) =>
+    Geo.distance(point, option[0].start) < Geo.distance(point, best[0].start) ? option : best,
+  );
+}
+
 export const OrbitPlanner = {
   plan(mission) {
     if (!mission.center) return null;
@@ -236,9 +259,10 @@ export function newMapMission(name = "Mapa", boundary = []) {
     frontOverlap: 75,
     sideOverlap: 70,
     direction: 0,
+    pattern: "normal",
     gimbalPitch: -90,
     maxSpeed: 8,
-    minPhotoInterval: 2,
+    minPhotoInterval: 5,
   };
 }
 
@@ -268,6 +292,7 @@ export function normalizeMission(json) {
   const base = json.type === "orbit" ? newOrbitMission() : newMapMission();
   const mission = { ...base, ...json, version: 1 };
   if (!FINISH_ACTIONS.some(([key]) => key === mission.finishAction)) mission.finishAction = base.finishAction;
+  if (mission.type === "map" && mission.pattern !== "grid") mission.pattern = "normal";
   return mission;
 }
 
@@ -298,7 +323,8 @@ export function summary(mission) {
   if (mission.type === "map") {
     const plan = MapPlanner.plan(mission);
     if (plan.legs.length === 0) return `Mapa · ${num(mission.altitude)} m · sin área`;
-    return `${num(mission.altitude)} m · ${num(plan.areaHectares, 2)} ha · ${plan.legs.length} líneas · ${plan.photoCount} fotos · ${formatDuration(plan.durationSeconds)}`;
+    const pattern = mission.pattern === "grid" ? " cruzadas" : "";
+    return `${num(mission.altitude)} m · ${num(plan.areaHectares, 2)} ha · ${plan.legs.length} líneas${pattern} · ${plan.photoCount} fotos · ${formatDuration(plan.durationSeconds)}`;
   }
   const plan = OrbitPlanner.plan(mission);
   const turns = mission.rotations === 1 ? "1 vuelta" : `${num(mission.rotations, 1)} vueltas`;

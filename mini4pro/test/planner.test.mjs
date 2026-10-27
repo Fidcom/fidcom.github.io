@@ -47,6 +47,17 @@ test("la velocidad la limita el tiempo entre fotos", () => {
   near(plan.speed, 0.54, 0.01);
 });
 
+test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () => {
+  const normal = MapPlanner.plan(map({ altitude: 30, direction: 0 }));
+  const plan = MapPlanner.plan(map({ altitude: 30, direction: 0, pattern: "grid" }));
+  assert.equal(plan.legs.length, 16);
+  for (const leg of plan.legs.slice(normal.legs.length)) {
+    near(pr.toLocal(leg.start).y, pr.toLocal(leg.end).y, 0.01, "segunda pasada este-oeste");
+  }
+  const jump = Geo.distance(normal.legs.at(-1).end, plan.legs[normal.legs.length].start);
+  assert.ok(jump < 15, `salto entre pasadas ${jump}`);
+});
+
 test("la órbita empieza al sur y cierra el círculo", () => {
   const plan = OrbitPlanner.plan({ ...newOrbitMission(), center: origin, radius: 30 });
   const start = pr.toLocal(plan.start);
