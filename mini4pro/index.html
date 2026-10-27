@@ -95,7 +95,14 @@
       <div class="tool-group">
         <button id="tool-fit" class="tool" type="button" title="Ver toda la misión"><svg><use href="#i-fit" /></svg></button>
         <button id="tool-locate" class="tool" type="button" title="Ir a mi ubicación"><svg><use href="#i-gps" /></svg></button>
-        <button id="tool-labels" class="tool active" type="button" title="Mostrar nombres de lugares"><svg><use href="#i-labels" /></svg></button>
+        <button id="tool-layers" class="tool" type="button" title="Capas del mapa"><svg><use href="#i-labels" /></svg></button>
+      </div>
+      <div id="layer-menu" class="layer-menu" hidden>
+        <div class="menu-title">Imágenes satelitales</div>
+        <button type="button" data-base="esri"><span class="check"></span>Esri World Imagery</button>
+        <button type="button" data-base="bing"><span class="check"></span>Bing</button>
+        <div class="menu-sep"></div>
+        <button type="button" id="layer-labels"><span class="check square"></span>Nombres de lugares</button>
       </div>
     </div>
 

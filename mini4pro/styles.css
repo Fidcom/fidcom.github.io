@@ -725,6 +725,7 @@ button {
 
 .map-tools {
   position: fixed;
+  /* Ancla del menú de capas. */
   top: 12px;
   right: 12px;
   z-index: 1000;
@@ -772,6 +773,78 @@ button {
 
 .tool.active {
   color: var(--accent);
+}
+
+.layer-menu {
+  position: absolute;
+  top: 0;
+  right: 52px;
+  width: 230px;
+  padding: 6px;
+  background: var(--panel-solid);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.layer-menu .menu-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 8px 10px 4px;
+}
+
+.layer-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  text-align: left;
+  font-size: 13px;
+}
+
+.layer-menu button:hover {
+  background: var(--card-hover);
+  color: var(--text);
+}
+
+.layer-menu button.selected {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.layer-menu .check {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--text-3);
+  flex: none;
+}
+
+.layer-menu .check.square {
+  border-radius: 4px;
+}
+
+.layer-menu button.selected .check {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 45%, transparent 50%);
+}
+
+.layer-menu button.selected .check.square {
+  background: var(--accent);
+}
+
+.menu-sep {
+  height: 1px;
+  background: var(--stroke);
+  margin: 6px 4px;
 }
 
 .map-hint {
