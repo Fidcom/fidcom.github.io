@@ -1,5 +1,6 @@
 // Planificador de misiones para el DJI Mini 4 Pro: la versión de PC del editor de la app Mini4Pro.
-// Las misiones se guardan en este navegador y, si hay token, en GitHub para que las lea el teléfono.
+// Una misión es un plan con componentes en fila (mapas y órbitas), como en Dronelink. Se guardan en
+// este navegador y, si hay token, en GitHub para que las lea el teléfono.
 import {
   CAPTURE_MODES,
   CAPTURE_PRIORITIES,
@@ -23,20 +24,29 @@ import {
   VIDEO_RESOLUTIONS,
   WHITE_BALANCES,
   Geo,
+  LOCALE,
   MapPlanner,
   OrbitPlanner,
+  PlanPlanner,
   cameraFor,
+  componentName,
+  componentSummary,
+  copyComponent,
+  endAltitude,
   formatDuration,
-  geometry,
-  newMapMission,
-  newOrbitMission,
-  normalizeMission,
-  LOCALE,
+  hasGeometry,
+  newMapComponent,
+  newOrbitComponent,
+  newPlan,
+  normalizePlan,
   num,
   parseKml,
+  planPoints,
+  projection,
   summary,
-} from "./planner.js";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js";
+  takeoffOf,
+} from "./planner.js?v=20261027b";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261027b";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -70,13 +80,13 @@ const storage = {
 
 // ---------- Estado ----------
 
-/** missions: misiones por id · shas: versión sincronizada · dirty: por subir · deleted: por borrar en GitHub */
+/** missions: planes por id · shas: versión sincronizada · dirty: por subir · deleted: por borrar en GitHub */
 const state = (() => {
   try {
     const saved = JSON.parse(storage.get(STATE_KEY));
     if (saved?.missions) {
-      // Las misiones guardadas antes de agregar un parámetro nuevo lo reciben con su valor por defecto.
-      for (const id of Object.keys(saved.missions)) saved.missions[id] = normalizeMission(saved.missions[id]);
+      // Las misiones de antes (un solo mapa u órbita, o sin algún parámetro nuevo) se vuelven planes completos.
+      for (const id of Object.keys(saved.missions)) saved.missions[id] = normalizePlan(saved.missions[id]);
       return { shas: {}, dirty: {}, deleted: {}, ...saved };
     }
   } catch {
@@ -88,12 +98,22 @@ const state = (() => {
 const persist = () => storage.set(STATE_KEY, JSON.stringify(state));
 let token = storage.get(TOKEN_KEY) || "";
 
-/** Misión abierta en el editor (una copia); null en la lista. */
+/** Plan abierto en el editor (una copia); null en la lista. */
 let current = null;
+/** Componente abierto dentro del plan; null = la vista del plan. */
+let selectedId = null;
+/** Última ruta calculada del plan abierto (PlanPlanner.plan). */
+let planResult = null;
 let undoStack = [];
 let redoStack = [];
 const clone = (value) => structuredClone(value);
-const toPoint = (latlng) => [Math.round(latlng.lat * 1e7) / 1e7, Math.round(latlng.lng * 1e7) / 1e7];
+const round7 = (x) => Math.round(x * 1e7) / 1e7;
+const toPoint = (latlng) => [round7(latlng.lat), round7(latlng.lng)];
+const rad = (d) => (d * Math.PI) / 180;
+
+const selected = () => current?.components.find((c) => c.id === selectedId) ?? null;
+const selectedItem = () => planResult?.items.find((item) => item.component.id === selectedId) ?? null;
+const typeIcon = (component) => (component.type === "map" ? "grid" : "orbit");
 
 // ---------- Mapa ----------
 
@@ -145,11 +165,6 @@ function fitTo(points, maxZoom = 19) {
   map.fitBounds(L.latLngBounds(points), { ...fitPadding(), maxZoom });
 }
 
-function missionPoints(mission) {
-  if (mission.type === "map") return mission.boundary;
-  return OrbitPlanner.plan(mission)?.path ?? [];
-}
-
 function divIcon(className, size, html = "") {
   return L.divIcon({ className: "", html: `<div class="${className}">${html}</div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
@@ -162,63 +177,129 @@ function arrow(at, bearing) {
   });
 }
 
-/** Dibuja una misión: el área en blanco, la ruta en azul y el inicio en verde, como en Dronelink. */
-function drawMission(mission, group, { faded = false, arrows = false, interactive = false, startLabel = !faded } = {}) {
+const PIN_PATH = "M14 1C6.8 1 1 6.7 1 13.9 1 23.6 14 35 14 35s13-11.4 13-21.1C27 6.7 21.2 1 14 1z";
+const altitudeText = (meters) => `${num(meters)} m`;
+
+/** Pin como los de Dronelink: azul con el número del componente, o morado (H) para el despegue. */
+function pinIcon(kind, text, label) {
+  return L.divIcon({
+    className: "",
+    html: `<div class="pin ${kind}"><span class="pin-halo"></span><svg viewBox="0 0 28 36"><path d="${PIN_PATH}" /></svg><span class="pin-text">${text}</span>${
+      label ? `<span class="pin-label">${label}</span>` : ""
+    }</div>`,
+    iconSize: [28, 36],
+    iconAnchor: [14, 36],
+  });
+}
+
+function startPin(item, draggable = false) {
+  const off = item.component.enabled ? "" : " off";
+  return L.marker(item.result.path[0], {
+    icon: pinIcon(`start${off}${draggable ? " draggable" : ""}`, String(item.number), altitudeText(item.component.altitude)),
+    draggable,
+    interactive: draggable,
+    keyboard: false,
+    zIndexOffset: draggable ? 1500 : 400,
+  });
+}
+
+function endMarker(item) {
+  const label = altitudeText(endAltitude(item.component));
+  return L.marker(item.result.path.at(-1), {
+    icon: L.divIcon({ className: "", html: `<div class="end-dot"></div><span class="end-label">${label}</span>`, iconSize: [12, 12], iconAnchor: [6, 6] }),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 300,
+  });
+}
+
+/** Área y ruta de un componente. Uno apagado (que no se vuela) va gris y punteado. */
+function drawComponent({ component, result }, { faded, dim, arrows, interactive }) {
   const layers = [];
-  const routeStyle = { color: ACCENT, weight: faded ? 2.5 : 3, opacity: faded ? 0.75 : 1, lineJoin: "round", interactive };
-  if (mission.type === "map") {
-    if (mission.boundary.length >= 2) {
+  const off = !component.enabled;
+  const route = {
+    color: off ? "#a7b0b8" : ACCENT,
+    weight: faded || dim ? 2.5 : 3.5,
+    opacity: faded ? 0.75 : dim ? 0.65 : 1,
+    lineJoin: "round",
+    dashArray: off ? "4 7" : null,
+    interactive,
+  };
+  if (component.type === "map") {
+    if (component.boundary.length >= 2) {
       layers.push(
-        L.polygon(mission.boundary, {
+        L.polygon(component.boundary, {
           color: "#ffffff",
-          weight: 2.5,
-          opacity: faded ? 0.75 : 1,
+          weight: dim ? 1.5 : 2.5,
+          opacity: faded || dim ? 0.7 : 1,
           fillColor: "#ffffff",
-          fillOpacity: faded ? 0.1 : 0.16,
+          fillOpacity: faded || dim ? 0.08 : 0.16,
           interactive,
         }),
       );
     }
-    const plan = MapPlanner.plan(mission);
-    if (plan.legs.length > MAX_LEGS) {
-      // Un área enorme (marcada con el mapa muy alejado) no se dibuja: serían miles de líneas.
-    } else if (plan.path.length) {
-      layers.push(L.polyline(plan.path, routeStyle));
+    // Un área enorme (marcada con el mapa muy alejado) no se dibuja: serían miles de líneas.
+    if (result && result.legs.length <= MAX_LEGS) {
+      layers.push(L.polyline(result.path, route));
       if (arrows) {
-        for (const leg of plan.legs) {
+        for (const leg of result.legs) {
           const mid = [(leg.start[0] + leg.end[0]) / 2, (leg.start[1] + leg.end[1]) / 2];
           layers.push(arrow(mid, Geo.bearing(leg.start, leg.end)));
         }
       }
-      layers.push(endMarker(plan.path.at(-1)));
-      layers.push(startMarker(plan.path[0], startLabel));
     }
-  } else {
-    const plan = OrbitPlanner.plan(mission);
-    if (plan) {
-      layers.push(L.polyline(plan.path, routeStyle));
-      if (arrows) {
-        const step = Math.max(1, Math.round(plan.path.length / (8 * mission.rotations)));
-        for (let i = step; i < plan.path.length - 1; i += step) layers.push(arrow(plan.path[i], Geo.bearing(plan.path[i], plan.path[i + 1])));
-      }
-      if (faded) layers.push(L.circleMarker(mission.center, { radius: 5, color: "#fff", weight: 2, fillColor: "#ffc107", fillOpacity: 1, interactive }));
-      layers.push(startMarker(plan.start, !faded));
+  } else if (result) {
+    layers.push(L.polyline(result.path, route));
+    if (arrows) {
+      const step = Math.max(1, Math.round(result.path.length / (8 * component.rotations)));
+      for (let i = step; i < result.path.length - 1; i += step) layers.push(arrow(result.path[i], Geo.bearing(result.path[i], result.path[i + 1])));
     }
+    if (faded || dim) layers.push(L.circleMarker(component.center, { radius: 4, color: "#fff", weight: 2, fillColor: "#3ddc84", fillOpacity: 1, interactive }));
   }
-  layers.forEach((layer) => group.addLayer(layer));
   return layers;
 }
 
-function endMarker(at) {
-  return L.marker(at, { icon: divIcon("end-dot", 12), interactive: false, keyboard: false });
-}
-
-function startMarker(at, label) {
-  return L.marker(at, {
-    icon: divIcon("start-dot", 16, label ? '<span class="start-label">Inicio</span>' : ""),
-    interactive: false,
-    keyboard: false,
-  });
+/**
+ * Dibuja un plan: cada componente, los tránsitos entre ellos en blanco (despegue → componentes →
+ * regreso), un pin con el número y la altura donde empieza cada uno y un punto rojo donde termina.
+ * En el editor, el componente abierto va resaltado y los demás se pueden tocar para abrirlos.
+ */
+function drawPlan(plan, group, { faded = false, interactive = false, selectedId = null, editing = false, onSelect = null } = {}) {
+  const result = PlanPlanner.plan(plan);
+  for (const t of result.transits) {
+    group.addLayer(
+      L.polyline([t.from, t.to], {
+        color: "#ffffff",
+        weight: faded ? 1.5 : 2,
+        opacity: faded ? 0.55 : 0.9,
+        dashArray: t.kind === "home" ? "6 6" : null,
+        interactive: false,
+      }),
+    );
+  }
+  for (const item of result.items) {
+    const isSelected = item.component.id === selectedId;
+    const dim = selectedId !== null && !isSelected;
+    const clickable = interactive || (Boolean(onSelect) && !isSelected);
+    const layers = drawComponent(item, { faded, dim, arrows: editing && (selectedId === null || isSelected), interactive: clickable });
+    for (const layer of layers) {
+      if (onSelect && !isSelected) {
+        layer.on("click", (event) => {
+          L.DomEvent.stop(event);
+          onSelect(item.component.id);
+        });
+      }
+      group.addLayer(layer);
+    }
+    if (item.result && !faded && (item.component.type === "orbit" || item.result.legs.length <= MAX_LEGS)) {
+      // El pin del componente abierto se arrastra: lo pone drawHandles.
+      if (!(editing && isSelected)) group.addLayer(startPin(item));
+      // Una órbita de vueltas completas termina donde empezó: basta con el pin.
+      const closed = Geo.distance(item.result.path[0], item.result.path.at(-1)) < 5 && endAltitude(item.component) === item.component.altitude;
+      if (!closed) group.addLayer(endMarker(item));
+    }
+  }
+  return result;
 }
 
 // ---------- Lista ----------
@@ -234,33 +315,35 @@ function whenText(time) {
   return `Editada el ${new Date(time).toLocaleDateString(LOCALE, { day: "numeric", month: "short", year: "numeric" })}`;
 }
 
-function sortedMissions() {
+function sortedPlans() {
   return Object.values(state.missions).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+const planIcon = (plan) => (plan.components.length === 1 ? typeIcon(plan.components[0]) : "plan");
+
 function renderList() {
-  const missions = sortedMissions();
+  const plans = sortedPlans();
   const list = $("mission-list");
   list.replaceChildren();
   listLayer.clearLayers();
-  $("list-empty").hidden = missions.length > 0;
+  $("list-empty").hidden = plans.length > 0;
 
-  for (const mission of missions) {
+  for (const plan of plans) {
     const card = document.createElement("div");
     card.className = "mission-card";
     card.innerHTML = `
-      <div class="type"><svg><use href="#i-${mission.type === "map" ? "grid" : "orbit"}" /></svg></div>
+      <div class="type"><svg><use href="#i-${planIcon(plan)}" /></svg></div>
       <div class="body"><div class="name"></div><div class="meta"></div><div class="when"></div></div>`;
-    card.querySelector(".name").textContent = mission.name;
-    card.querySelector(".meta").textContent = summary(mission);
-    card.querySelector(".when").textContent = whenText(mission.updatedAt);
-    card.addEventListener("click", () => openEditor(mission.id));
+    card.querySelector(".name").textContent = plan.name;
+    card.querySelector(".meta").textContent = summary(plan);
+    card.querySelector(".when").textContent = whenText(plan.updatedAt);
+    card.addEventListener("click", () => openPlan(plan.id));
     list.append(card);
 
     const group = L.featureGroup().addTo(listLayer);
-    drawMission(mission, group, { faded: true, interactive: true });
-    group.bindTooltip(mission.name, { sticky: true, className: "mission-tooltip", direction: "top" });
-    group.on("click", () => openEditor(mission.id));
+    drawPlan(plan, group, { faded: true, interactive: true });
+    group.bindTooltip(plan.name, { sticky: true, className: "mission-tooltip", direction: "top" });
+    group.on("click", () => openPlan(plan.id));
     group.on("mouseover", () => card.classList.add("hover"));
     group.on("mouseout", () => card.classList.remove("hover"));
     card.addEventListener("mouseenter", () => group.eachLayer((l) => l.setStyle?.({ weight: 4 })));
@@ -269,50 +352,62 @@ function renderList() {
 }
 
 function fitAll() {
-  const points = sortedMissions().flatMap(missionPoints);
+  const points = sortedPlans().flatMap(planPoints);
   if (points.length) fitTo(points, 17);
 }
 
 // ---------- Editor ----------
 
-function openEditor(id, mission = null) {
-  const source = mission ?? state.missions[id];
+/** Abre un plan; con `componentId`, directo en ese componente. */
+function openPlan(id, plan = null, componentId = null) {
+  const source = plan ?? state.missions[id];
   if (!source) return;
   current = clone(source);
   undoStack = [];
   redoStack = [];
   $("list-view").hidden = true;
-  $("editor-view").hidden = false;
   $("edit-tools").hidden = false;
-  $("editor-name").value = current.name;
-  $("editor-type-icon").querySelector("use").setAttribute("href", `#i-${current.type === "map" ? "grid" : "orbit"}`);
   map.removeLayer(listLayer);
   shapeLayer.addTo(map);
   handleLayer.addTo(map);
   map.doubleClickZoom.disable();
-  history.replaceState(null, "", `#m/${current.id}`);
-  buildParams();
+  showView(componentId);
+  const points = planPoints(current);
+  if (points.length) fitTo(points);
+}
+
+/** Muestra el plan (null) o uno de sus componentes. */
+function showView(componentId) {
+  document.activeElement?.blur?.();
+  selectedId = current.components.some((c) => c.id === componentId) ? componentId : null;
+  $("plan-view").hidden = selectedId !== null;
+  $("component-view").hidden = selectedId === null;
+  $("add-menu")?.remove();
+  history.replaceState(null, "", selectedId ? `#m/${current.id}/${selectedId}` : `#m/${current.id}`);
   refresh();
-  if (geometry(current).length) fitTo(missionPoints(current));
+  buildPanel();
 }
 
 function closeEditor() {
   if (!current) return;
   document.activeElement?.blur?.();
   // Una misión nueva sin área ni centro no se guarda.
-  if (geometry(current).length === 0 && !state.shas[current.id] && state.missions[current.id]) {
+  if (!hasGeometry(current) && !state.shas[current.id] && state.missions[current.id]) {
     delete state.missions[current.id];
     delete state.dirty[current.id];
     persist();
   }
   current = null;
+  selectedId = null;
+  planResult = null;
   shapeLayer.clearLayers();
   handleLayer.clearLayers();
   map.removeLayer(shapeLayer);
   map.removeLayer(handleLayer);
   listLayer.addTo(map);
   map.doubleClickZoom.enable();
-  $("editor-view").hidden = true;
+  $("plan-view").hidden = true;
+  $("component-view").hidden = true;
   $("list-view").hidden = false;
   $("edit-tools").hidden = true;
   $("map-hint").hidden = true;
@@ -320,7 +415,7 @@ function closeEditor() {
   renderList();
 }
 
-/** Guarda la misión abierta (en este navegador y, en un momento, en GitHub). */
+/** Guarda el plan abierto (en este navegador y, en un momento, en GitHub). */
 function save() {
   current.updatedAt = Date.now();
   state.missions[current.id] = clone(current);
@@ -351,13 +446,11 @@ function redo() {
 }
 
 function afterHistoryJump() {
-  $("editor-name").value = current.name;
   save();
-  buildParams();
-  refresh();
+  showView(selectedId);
 }
 
-/** Cambio de esquinas o centro: se puede deshacer y redibuja todo. */
+/** Cambio en el mapa (esquinas, centro, despegue): se puede deshacer y redibuja todo. */
 function editGeometry(change) {
   remember();
   change();
@@ -371,198 +464,291 @@ function refresh() {
   updateHint();
 }
 
-/** Redibuja el área y la ruta, y actualiza el resumen y las ayudas. Sirve también mientras se arrastra. */
+/** Redibuja la ruta y actualiza los números del panel. Sirve también mientras se arrastra. */
 function redrawShapes() {
   shapeLayer.clearLayers();
-  // En un mapa, la etiqueta de Inicio es la que se arrastra (drawAreaHandles).
-  drawMission(current, shapeLayer, { arrows: true, startLabel: current.type !== "map" });
-  $("editor-summary").textContent = summary(current);
+  planResult = drawPlan(current, shapeLayer, { selectedId, editing: true, onSelect: (id) => showView(id) });
   renderStats();
   helpUpdaters.forEach((update) => update());
   $("tool-undo").disabled = undoStack.length === 0;
   $("tool-redo").disabled = redoStack.length === 0;
-  $("tool-clear").disabled = geometry(current).length === 0;
+  const component = selected();
+  $("tool-clear").disabled = !component || (component.type === "map" ? component.boundary.length === 0 : !component.center);
 }
 
 function distanceText(meters) {
   return meters >= 1000 ? `${num(meters / 1000, 2)} km` : `${num(meters)} m`;
 }
 
+function statsHtml(stats) {
+  return stats.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+}
+
 function renderStats() {
+  const component = selected();
+  if (!component) {
+    const r = planResult;
+    const n = current.components.length;
+    const parts = [`${n} ${n === 1 ? "componente" : "componentes"}`];
+    if (r.flown === 0) parts.push("sin área todavía");
+    else parts.push(`${formatDuration(r.durationSeconds)} en total`);
+    $("plan-summary").textContent = n === 0 ? "Sin componentes: añade un mapa o una órbita" : parts.join(" · ");
+    $("plan-stats").innerHTML = statsHtml([
+      ["Duración", r.flown ? formatDuration(r.durationSeconds) : "—"],
+      ["Distancia", r.flown ? distanceText(r.lengthMeters) : "—"],
+      ["Fotos", r.photoCount ? String(r.photoCount) : "—"],
+    ]);
+    return;
+  }
+  $("component-summary").textContent = componentSummary(component);
+  const result = selectedItem()?.result;
   let stats;
-  if (current.type === "map") {
-    const plan = MapPlanner.plan(current);
+  if (component.type === "map") {
+    const info = result ?? MapPlanner.plan(component);
     stats = [
-      ["Duración", plan.legs.length ? formatDuration(plan.durationSeconds) : "—"],
-      current.captureMode === "photo"
-        ? ["Fotos", plan.legs.length ? String(plan.photoCount) : "—"]
-        : ["Captura", current.captureMode === "video" ? "Video" : "Nada"],
-      ["Distancia", plan.legs.length ? distanceText(plan.lengthMeters) : "—"],
-      ["Área", plan.areaHectares ? `${num(plan.areaHectares, 2)} ha` : "—"],
-      ["GSD", `${num(plan.gsdCmPerPx, 2)} cm/px`],
-      ["Líneas", plan.legs.length ? String(plan.legs.length) : "—"],
+      ["Duración", result ? formatDuration(result.durationSeconds) : "—"],
+      component.captureMode === "photo"
+        ? ["Fotos", result ? String(result.photoCount) : "—"]
+        : ["Captura", component.captureMode === "video" ? "Video" : "Nada"],
+      ["Distancia", result ? distanceText(result.lengthMeters) : "—"],
+      ["Área", info.areaHectares ? `${num(info.areaHectares, 2)} ha` : "—"],
+      ["GSD", `${num(info.gsdCmPerPx, 2)} cm/px`],
+      ["Líneas", result ? String(result.legs.length) : "—"],
     ];
   } else {
-    const plan = OrbitPlanner.plan(current);
     stats = [
-      ["Duración", plan ? formatDuration(plan.durationSeconds) : "—"],
-      ["Distancia", plan ? distanceText(plan.lengthMeters) : "—"],
-      ["Fotos", plan && plan.photoCount ? String(plan.photoCount) : "—"],
+      ["Duración", result ? formatDuration(result.durationSeconds) : "—"],
+      ["Distancia", result ? distanceText(result.lengthMeters) : "—"],
+      ["Fotos", result?.photoCount ? String(result.photoCount) : "—"],
     ];
   }
-  $("editor-stats").innerHTML = stats.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  $("component-stats").innerHTML = statsHtml(stats);
 }
 
 function updateHint() {
   const hint = $("map-hint");
-  if (current.type === "map") {
-    const n = current.boundary.length;
+  const component = selected();
+  if (!component) {
+    hint.textContent = current.components.length
+      ? "Haz clic en un componente para editarlo · arrastra la H morada para mover el despegue"
+      : "Añade un mapa o una órbita a la misión";
+  } else if (component.type === "map") {
+    const n = component.boundary.length;
     hint.textContent =
-      MapPlanner.plan(current).legs.length > MAX_LEGS
+      selectedItem()?.result?.legs.length > MAX_LEGS
         ? "El área es demasiado grande para un vuelo: acércate en el mapa y márcala de nuevo"
         : n === 0
-        ? "Haz clic en el mapa para marcar las esquinas del área"
-        : n < 3
-          ? "Sigue marcando esquinas: hacen falta al menos 3"
-          : "Arrastra una esquina para moverla · clic en ella para quitarla · arrastra un punto pequeño para agregar otra";
+          ? "Haz clic en el mapa para marcar las esquinas del área"
+          : n < 3
+            ? "Sigue marcando esquinas: hacen falta al menos 3"
+            : "Arrastra el centro para mover el área · las esquinas para cambiarla · el + para agregar otra · el pin para empezar en otra esquina";
   } else {
-    hint.textContent = current.center
-      ? "Arrastra el centro para moverlo, o el cuadrito azul para cambiar el radio y dónde empieza"
+    hint.textContent = component.center
+      ? "Arrastra el centro para mover la órbita · el cuadrito para cambiar el radio · el pin para cambiar dónde empieza"
       : "Haz clic en el mapa para poner el centro de la órbita";
   }
   hint.hidden = false;
 }
 
 map.on("click", (event) => {
-  if (!current) return;
+  const component = selected();
+  if (!component) return;
   const point = toPoint(event.latlng);
-  editGeometry(() => {
-    if (current.type === "map") current.boundary = Geo.insertIntoPolygon(current.boundary, point);
-    else current.center = point;
-  });
+  if (component.type === "map") editGeometry(() => (component.boundary = Geo.insertIntoPolygon(component.boundary, point)));
+  else if (!component.center) editGeometry(() => (component.center = point));
 });
+
+// ---------- Puntos que se arrastran ----------
+
+/** Cada punto arrastrable con la función que dice dónde va, para moverlos juntos mientras se arrastra otro. */
+let handles = [];
+
+function addHandle(marker, at) {
+  handles.push({ marker, at });
+  handleLayer.addLayer(marker);
+}
+
+function followHandles(dragged) {
+  for (const { marker, at } of handles) {
+    if (marker === dragged) continue;
+    const point = at();
+    if (point) marker.setLatLng(point);
+  }
+}
+
+/** Conecta un punto arrastrable: guarda para deshacer al empezar, aplica `move` al moverlo y guarda al soltarlo. */
+function draggable(marker, move, { follow = true, done } = {}) {
+  marker.on("dragstart", () => remember());
+  marker.on("drag", () => {
+    move(toPoint(marker.getLatLng()));
+    redrawShapes();
+    if (follow) followHandles(marker);
+  });
+  marker.on("dragend", () => {
+    save();
+    refresh();
+    done?.();
+  });
+}
 
 function drawHandles() {
   handleLayer.clearLayers();
-  if (current.type === "map") drawAreaHandles();
-  else if (current.center) drawOrbitHandles();
+  handles = [];
+  drawTakeoffHandle();
+  const component = selected();
+  if (component?.type === "map") drawAreaHandles(component);
+  else if (component?.center) drawOrbitHandles(component);
 }
 
-function drawAreaHandles() {
-  const points = current.boundary;
-  const midpoints = [];
-  const edgeCount = points.length >= 3 ? points.length : points.length - 1;
+/** La H morada: dónde despega el dron. Sin marcarla, va en el centro del primer componente. */
+function drawTakeoffHandle() {
+  const at = () => takeoffOf(current);
+  if (!at()) return;
+  const marker = L.marker(at(), {
+    icon: pinIcon("takeoff draggable", "H", current.takeoff ? "Despegue" : "Despegue (auto)"),
+    draggable: true,
+    zIndexOffset: 1400,
+    title: "Despegue: arrástralo a donde vas a despegar",
+  });
+  const wasAuto = !current.takeoff;
+  draggable(marker, (point) => (current.takeoff = point), { done: () => wasAuto && !selectedId && buildPanel() });
+  addHandle(marker, at);
+}
+
+function drawAreaHandles(component) {
+  const count = component.boundary.length;
+  const edgeCount = count >= 3 ? count : count - 1;
   const midpointOf = (i) => {
-    const a = points[i];
-    const b = points[(i + 1) % points.length];
-    return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const a = component.boundary[i];
+    const b = component.boundary[(i + 1) % component.boundary.length];
+    return a && b ? [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] : null;
   };
 
-  // Puntos pequeños a mitad de cada lado: al arrastrarlos se agrega una esquina.
+  // Un + a mitad de cada lado: al tocarlo o arrastrarlo se agrega una esquina.
   for (let i = 0; i < edgeCount; i++) {
-    const marker = L.marker(midpointOf(i), { icon: divIcon("mid-handle", 12), draggable: true, zIndexOffset: 500, title: "Arrastra para agregar una esquina" });
+    const marker = L.marker(midpointOf(i), {
+      icon: divIcon("mid-handle", 16, "+"),
+      draggable: true,
+      zIndexOffset: 500,
+      title: "Arrastra o toca para agregar una esquina",
+    });
     let inserted = -1;
     marker.on("dragstart", () => {
       remember();
       inserted = i + 1;
-      current.boundary.splice(inserted, 0, toPoint(marker.getLatLng()));
+      component.boundary.splice(inserted, 0, toPoint(marker.getLatLng()));
     });
     marker.on("drag", () => {
-      current.boundary[inserted] = toPoint(marker.getLatLng());
+      component.boundary[inserted] = toPoint(marker.getLatLng());
       redrawShapes();
     });
     marker.on("dragend", () => {
       save();
       refresh();
     });
-    marker.on("click", () => editGeometry(() => current.boundary.splice(i + 1, 0, midpointOf(i))));
-    midpoints.push(marker);
-    handleLayer.addLayer(marker);
+    marker.on("click", (event) => {
+      L.DomEvent.stop(event);
+      editGeometry(() => component.boundary.splice(i + 1, 0, midpointOf(i)));
+    });
+    addHandle(marker, () => midpointOf(i));
   }
 
-  points.forEach((point, i) => {
-    const marker = L.marker(point, { icon: divIcon("vertex-handle", 18), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
-    marker.on("dragstart", () => remember());
-    marker.on("drag", () => {
-      current.boundary[i] = toPoint(marker.getLatLng());
-      // Mueve los puntos medios de los dos lados que tocan esta esquina.
-      [i - 1 < 0 ? edgeCount - 1 : i - 1, i].forEach((edge) => {
-        if (midpoints[edge] && edge < edgeCount) midpoints[edge].setLatLng(midpointOf(edge));
-      });
-      redrawShapes();
-    });
-    marker.on("dragend", () => {
-      save();
-      refresh();
-    });
-    const removeVertex = () => editGeometry(() => current.boundary.splice(i, 1));
+  component.boundary.forEach((point, i) => {
+    const marker = L.marker(point, { icon: divIcon("vertex-handle", 20), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
+    draggable(marker, (p) => (component.boundary[i] = p));
+    const removeVertex = (event) => {
+      L.DomEvent.stop(event);
+      editGeometry(() => component.boundary.splice(i, 1));
+    };
     marker.on("click", removeVertex);
     marker.on("contextmenu", removeVertex);
-    handleLayer.addLayer(marker);
+    addHandle(marker, () => component.boundary[i]);
   });
 
-  // El punto de inicio se arrastra a otra esquina para empezar por ahí.
-  const plan = MapPlanner.plan(current);
-  if (plan.path.length && plan.legs.length <= MAX_LEGS) {
-    const start = L.marker(plan.path[0], {
-      // La etiqueta queda a la derecha del punto, para no tapar la esquina.
-      icon: L.divIcon({ className: "", html: '<div class="start-handle">Inicio</div>', iconSize: [64, 22], iconAnchor: [-12, 11] }),
+  // El círculo del centro mueve toda el área (y la esquina de inicio con ella).
+  if (count >= 3) {
+    const at = () => Geo.centroid(component.boundary);
+    const marker = L.marker(at(), {
+      icon: divIcon("move-handle", 32, '<svg><use href="#i-move" /></svg>'),
       draggable: true,
-      zIndexOffset: 1500,
-      title: "Arrastra a otra esquina para empezar por ahí",
+      zIndexOffset: 1100,
+      title: "Arrastra para mover toda el área",
     });
-    start.on("dragstart", () => remember());
-    start.on("drag", () => {
-      current.start = toPoint(start.getLatLng());
-      redrawShapes();
+    let from = null;
+    let boundary = null;
+    let start = null;
+    marker.on("dragstart", () => {
+      from = at();
+      boundary = component.boundary;
+      start = component.start;
     });
-    start.on("dragend", () => {
-      save();
-      refresh();
+    const roundPoint = ([lat, lon]) => [round7(lat), round7(lon)];
+    draggable(marker, (to) => {
+      component.boundary = Geo.translate(boundary, from, to).map(roundPoint);
+      if (start) component.start = roundPoint(Geo.translate([start], from, to)[0]);
     });
-    handleLayer.addLayer(start);
+    addHandle(marker, at);
+  }
+
+  // El pin azul de inicio se arrastra a otra esquina para empezar por ahí.
+  const item = selectedItem();
+  if (item?.result && item.result.legs.length <= MAX_LEGS) {
+    const marker = startPin(item, true);
+    marker.options.title = "Arrastra a otra esquina para empezar por ahí";
+    const wasAuto = component.start === null;
+    draggable(marker, (point) => (component.start = point), { follow: false, done: () => wasAuto && buildPanel() });
+    addHandle(marker, () => selectedItem()?.result?.path[0]);
   }
 }
 
-function drawOrbitHandles() {
-  const radiusPoint = () => OrbitPlanner.plan({ ...current, finalRadius: null, rotations: 1 }).start;
-  const center = L.marker(current.center, { icon: divIcon("vertex-handle center", 18), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover el centro" });
-  const radius = L.marker(radiusPoint(), {
+function drawOrbitHandles(component) {
+  const effectiveBearing = () => selectedItem()?.result?.startBearing ?? 180;
+  const onCircle = (bearing) => {
+    const b = rad(bearing);
+    return projection(component.center).toGeo({ x: component.radius * Math.sin(b), y: component.radius * Math.cos(b) });
+  };
+
+  const center = L.marker(component.center, {
+    icon: divIcon("orbit-center", 34, '<svg><use href="#i-orbit" /></svg>'),
+    draggable: true,
+    zIndexOffset: 1000,
+    title: "Arrastra para mover la órbita",
+  });
+  draggable(center, (point) => (component.center = point));
+  addHandle(center, () => component.center);
+
+  // El cuadrito, en el lado opuesto al inicio, cambia el radio.
+  const radius = L.marker(onCircle(effectiveBearing() + 180), {
     icon: divIcon("radius-handle", 16),
     draggable: true,
     zIndexOffset: 1000,
-    title: "Arrastra para cambiar el radio y dónde empieza",
+    title: "Arrastra para cambiar el radio",
   });
+  draggable(radius, (point) => {
+    component.radius = Math.min(500, Math.max(5, Math.round(Geo.distance(component.center, point))));
+    fieldSetters.radius?.(component.radius);
+  });
+  addHandle(radius, () => onCircle(effectiveBearing() + 180));
 
-  center.on("dragstart", () => remember());
-  center.on("drag", () => {
-    current.center = toPoint(center.getLatLng());
-    radius.setLatLng(radiusPoint());
-    redrawShapes();
-  });
-  center.on("dragend", () => {
-    save();
-    refresh();
-  });
-
-  radius.on("dragstart", () => remember());
-  radius.on("drag", () => {
-    const point = toPoint(radius.getLatLng());
-    current.radius = Math.min(500, Math.max(5, Math.round(Geo.distance(current.center, point))));
-    current.startBearing = Math.round(Geo.bearing(current.center, point));
-    fieldSetters.radius?.(current.radius);
-    redrawShapes();
-  });
-  radius.on("dragend", () => {
-    save();
-    refresh();
-  });
-
-  handleLayer.addLayer(center);
-  handleLayer.addLayer(radius);
+  // El pin azul se arrastra por el círculo para cambiar dónde empieza.
+  const item = selectedItem();
+  if (item?.result) {
+    const marker = startPin(item, true);
+    marker.options.title = "Arrastra por el círculo para cambiar dónde empieza";
+    const wasAuto = component.startBearing === null;
+    draggable(
+      marker,
+      (point) => {
+        component.startBearing = Math.round(Geo.bearing(component.center, point)) % 360;
+        fieldSetters.startBearing?.(component.startBearing);
+      },
+      { done: () => wasAuto && buildPanel() },
+    );
+    addHandle(marker, () => selectedItem()?.result?.start);
+  }
 }
 
-// ---------- Parámetros ----------
+// ---------- Panel ----------
 
 const helpUpdaters = [];
 const fieldSetters = {};
@@ -572,15 +758,28 @@ const parse = (text) => {
   return text.trim() === "" || !Number.isFinite(value) ? null : value;
 };
 
-function buildParams() {
-  const params = $("editor-params");
-  const scroll = params.scrollTop;
-  params.replaceChildren();
+/** Qué muestra el panel ahora, para no conservar el desplazamiento al pasar a otro componente. */
+let panelShown = null;
+
+function buildPanel() {
+  const container = selectedId ? $("component-params") : $("plan-body");
+  const shown = `${current.id}/${selectedId}`;
+  const scroll = shown === panelShown ? container.scrollTop : 0;
+  panelShown = shown;
+  container.replaceChildren();
   helpUpdaters.length = 0;
   for (const key of Object.keys(fieldSetters)) delete fieldSetters[key];
-  if (current.type === "map") buildMapParams(params);
-  else buildOrbitParams(params);
-  params.scrollTop = scroll;
+  const component = selected();
+  if (component) {
+    buildComponentHeader(component);
+    if (component.type === "map") buildMapParams(container, component);
+    else buildOrbitParams(container, component);
+  } else {
+    $("plan-name").value = current.name;
+    buildPlanBody(container);
+  }
+  container.scrollTop = scroll;
+  helpUpdaters.forEach((update) => update());
 }
 
 /** Texto de ayuda suelto dentro de una sección. */
@@ -591,16 +790,6 @@ function note(params, text) {
   params.append(el);
 }
 
-/** Guarda un cambio de un parámetro de opciones; con `rebuild`, redibuja el panel (cambian los campos visibles). */
-function setChoice(key, value, { rebuild = false, onChange } = {}) {
-  remember();
-  current[key] = value;
-  onChange?.(value);
-  save();
-  redrawShapes();
-  if (rebuild) buildParams();
-}
-
 function section(params, title) {
   const el = document.createElement("div");
   el.className = "section-title";
@@ -608,13 +797,23 @@ function section(params, title) {
   params.append(el);
 }
 
+/** Guarda un cambio de un parámetro de opciones; con `rebuild`, redibuja el panel (cambian los campos visibles). */
+function setChoice(obj, key, value, { rebuild = false, onChange } = {}) {
+  remember();
+  obj[key] = value;
+  onChange?.(value);
+  save();
+  redrawShapes();
+  if (rebuild) buildPanel();
+}
+
 /**
- * Un parámetro numérico. Se aplica mientras se escribe si está dentro de los límites; si no,
- * se avisa en amarillo y al salir del campo se corrige. Con `optional`, vacío vale null.
- * Con `scale`, se muestra el valor guardado multiplicado (por ejemplo m/s × 3,6 = km/h);
- * `min` y `max` van en las unidades que se muestran.
+ * Un parámetro numérico de `obj` (el componente abierto o el plan). Se aplica mientras se escribe
+ * si está dentro de los límites; si no, se avisa en amarillo y al salir del campo se corrige.
+ * Con `optional`, vacío vale null. Con `scale`, se muestra el valor guardado multiplicado (por
+ * ejemplo m/s × 3,6 = km/h); `min` y `max` van en las unidades que se muestran.
  */
-function numberParam(params, { key, label, unit = "", min, max, step = 1, decimals = 0, scale = 1, slider = false, optional = false, placeholder = "", help }) {
+function numberParam(params, obj, { key, label, unit = "", min, max, step = 1, decimals = 0, scale = 1, slider = false, optional = false, placeholder = "", help }) {
   const el = document.createElement("div");
   el.className = "param";
   el.innerHTML = `
@@ -651,20 +850,20 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
     box.classList.toggle("invalid", Boolean(error));
   };
   const begin = () => {
-    snapshot ??= clone(current);
+    snapshot ??= { plan: clone(current), value: obj[key] };
   };
   const commit = () => {
-    if (snapshot && JSON.stringify(snapshot[key]) !== JSON.stringify(current[key])) remember(snapshot);
+    if (snapshot && snapshot.value !== obj[key]) remember(snapshot.plan);
     snapshot = null;
     save();
     redrawShapes();
   };
   const apply = (display) => {
-    current[key] = display === null ? null : display / scale;
+    obj[key] = display === null ? null : display / scale;
     redrawShapes();
   };
 
-  show(current[key]);
+  show(obj[key]);
   fieldSetters[key] = show;
   helpUpdaters.push(showHelp);
 
@@ -685,24 +884,26 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
     }
   });
   input.addEventListener("blur", () => {
+    if (!snapshot) return;
     if (error) {
       const value = parse(input.value);
-      const fixed = value === null ? current[key] : Math.min(max, Math.max(min, value)) / scale;
+      const fixed = value === null ? obj[key] : Math.min(max, Math.max(min, value)) / scale;
       error = null;
       show(fixed);
-      current[key] = fixed;
+      obj[key] = fixed;
     } else {
-      show(current[key]);
+      show(obj[key]);
     }
     commit();
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") input.blur();
     if (event.key === "Escape") {
-      if (snapshot) current[key] = snapshot[key];
+      if (snapshot) obj[key] = snapshot.value;
       error = null;
-      show(current[key]);
+      show(obj[key]);
       snapshot = null;
+      redrawShapes();
       input.blur();
       event.stopPropagation();
     }
@@ -721,7 +922,7 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
   return { show };
 }
 
-function choiceParam(params, { key, label, options, help, rebuild, onChange }) {
+function choiceParam(params, obj, { key, label, options, help, rebuild, onChange }) {
   const el = document.createElement("div");
   el.className = "param";
   el.innerHTML = `<div class="label"></div><div class="segmented"></div><div class="help"></div>`;
@@ -737,22 +938,21 @@ function choiceParam(params, { key, label, options, help, rebuild, onChange }) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = text;
-    button.classList.toggle("selected", current[key] === value);
+    button.classList.toggle("selected", obj[key] === value);
     button.addEventListener("click", () => {
-      if (current[key] === value) return;
+      if (obj[key] === value) return;
       buttons.forEach((b) => b.classList.toggle("selected", b === button));
-      setChoice(key, value, { rebuild, onChange });
+      setChoice(obj, key, value, { rebuild, onChange });
     });
     segmented.append(button);
     return button;
   });
   helpUpdaters.push(showHelp);
-  showHelp();
   params.append(el);
 }
 
 /** Una lista desplegable, para opciones largas. Con `unset`, la primera opción es "Sin cambiar" (null). */
-function selectParam(params, { key, label, options, unset = false, help, rebuild, onChange }) {
+function selectParam(params, obj, { key, label, options, unset = false, help, rebuild, onChange }) {
   const el = document.createElement("div");
   el.className = "param";
   el.innerHTML = `
@@ -769,14 +969,14 @@ function selectParam(params, { key, label, options, unset = false, help, rebuild
   const all = unset ? [[null, "Sin cambiar"], ...options] : options;
   all.forEach(([value, text], i) => {
     const option = new Option(text, String(i));
-    option.selected = current[key] === value;
+    option.selected = obj[key] === value;
     select.append(option);
   });
-  el.querySelector(".select-box").classList.toggle("unset", current[key] === null);
+  el.querySelector(".select-box").classList.toggle("unset", obj[key] === null);
   select.addEventListener("change", () => {
     const value = all[Number(select.value)][0];
     el.querySelector(".select-box").classList.toggle("unset", value === null);
-    setChoice(key, value, { rebuild, onChange });
+    setChoice(obj, key, value, { rebuild, onChange });
   });
   const showHelp = () => {
     const text = help?.() ?? "";
@@ -784,12 +984,11 @@ function selectParam(params, { key, label, options, unset = false, help, rebuild
     helpEl.hidden = !text;
   };
   helpUpdaters.push(showHelp);
-  showHelp();
   params.append(el);
 }
 
 /** Un interruptor de sí o no. */
-function toggleParam(params, { key, label, help }) {
+function toggleParam(params, obj, { key, label, help }) {
   const el = document.createElement("label");
   el.className = "param toggle";
   el.innerHTML = `
@@ -799,8 +998,8 @@ function toggleParam(params, { key, label, help }) {
   el.querySelector(".help").textContent = help ?? "";
   const input = el.querySelector("input");
   input.id = `param-${key}`;
-  input.checked = Boolean(current[key]);
-  input.addEventListener("change", () => setChoice(key, input.checked));
+  input.checked = Boolean(obj[key]);
+  input.addEventListener("change", () => setChoice(obj, key, input.checked));
   params.append(el);
 }
 
@@ -811,15 +1010,220 @@ function buttonParam(params, label, onClick) {
   button.textContent = label;
   button.addEventListener("click", onClick);
   params.append(button);
+  return button;
 }
 
-function buildMapParams(params) {
-  const plan = () => MapPlanner.plan(current);
-  const photos = current.captureMode === "photo";
-  const byDistance = photos && current.capturePriority !== "time";
+// ---------- Panel del plan ----------
+
+function buildPlanBody(body) {
+  section(body, "COMPONENTES");
+  if (current.components.length === 0) note(body, "La misión está vacía. Añade un mapa (un área para fotografiar) o una órbita (un círculo alrededor de algo).");
+  current.components.forEach((component, index) => {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `component-card${component.enabled ? "" : " off"}`;
+    card.innerHTML = `
+      <span class="component-icon"><svg><use href="#i-${typeIcon(component)}" /></svg><span class="n">${index + 1}</span></span>
+      <span class="body"><span class="name"></span><span class="meta"></span></span>
+      <svg class="chevron"><use href="#i-chevron" /></svg>`;
+    card.querySelector(".name").textContent = componentName(component);
+    card.querySelector(".meta").textContent = componentSummary(component) + (component.enabled ? "" : " · no se vuela");
+    card.addEventListener("click", () => showView(component.id));
+    body.append(card);
+  });
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.id = "add-component";
+  add.className = "button outline small add-button";
+  add.innerHTML = '<svg><use href="#i-add" /></svg>Añadir';
+  add.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleAddMenu(add);
+  });
+  body.append(add);
+
+  section(body, "ESTIMADO");
+  const estimate = document.createElement("div");
+  estimate.className = "estimate";
+  body.append(estimate);
+  helpUpdaters.push(() => renderEstimate(estimate));
+
+  section(body, "AL TERMINAR Y ENTRE COMPONENTES");
+  choiceParam(body, current, {
+    key: "finishAction",
+    label: "Al terminar la misión",
+    options: FINISH_ACTIONS,
+    help: () =>
+      ({
+        HOVER: "Se queda en el aire donde terminó",
+        GO_HOME: "Vuelve al despegue y aterriza",
+        LAND: "Aterriza donde terminó",
+      })[current.finishAction],
+  });
+  numberParam(body, current, {
+    key: "transitSpeed",
+    label: "Velocidad entre componentes",
+    unit: "km/h",
+    scale: KMH,
+    min: 3,
+    max: 54,
+    step: 0.5,
+    decimals: 1,
+    help: () => "Al ir del despegue al primero, de uno al siguiente y al volver",
+  });
+  note(body, "La H morada es el despegue: arrástrala a donde vas a despegar. Cada componente empieza en el punto más cerca de donde viene el dron, salvo que muevas su pin.");
+  if (current.takeoff) {
+    buttonParam(body, "Despegue automático (junto al primer componente)", () => {
+      editGeometry(() => (current.takeoff = null));
+      buildPanel();
+    });
+  }
+}
+
+/** Tiempo de cada tramo del plan, como el "Mission Estimate" de Dronelink. */
+function renderEstimate(el) {
+  const rows = [];
+  const row = (label, seconds, meters, kind = "") => rows.push({ label, seconds, meters, kind });
+  for (const item of planResult.items) {
+    if (!item.component.enabled || !item.result) continue;
+    const name = `${item.number}. ${componentName(item.component)}`;
+    if (item.approach) row(item.approach.kind === "takeoff" ? `Despegue → ${name}` : `→ ${name}`, item.approach.durationSeconds, item.approach.lengthMeters, "transit");
+    row(name, item.result.durationSeconds, item.result.lengthMeters);
+  }
+  if (planResult.home) row("Regreso al despegue", planResult.home.durationSeconds, planResult.home.lengthMeters, "transit");
+  if (planResult.landingSeconds) row("Aterrizaje", planResult.landingSeconds, 0, "transit");
+  el.innerHTML = rows.length
+    ? rows
+        .map(
+          (r) =>
+            `<div class="estimate-row ${r.kind}"><span class="label"></span><span class="dist">${r.meters ? distanceText(r.meters) : ""}</span><span class="time">${formatDuration(r.seconds)}</span></div>`,
+        )
+        .join("")
+    : '<div class="section-note">Marca un área o una órbita para ver el tiempo de vuelo.</div>';
+  el.querySelectorAll(".estimate-row .label").forEach((span, i) => (span.textContent = rows[i].label));
+}
+
+function toggleAddMenu(anchor) {
+  if ($("add-menu")) {
+    $("add-menu").remove();
+    return;
+  }
+  const menu = document.createElement("div");
+  menu.id = "add-menu";
+  menu.className = "add-menu";
+  const items = [
+    ["grid", "Mapa", "Un área para fotografiar en líneas", () => addComponent(newMapComponent())],
+    ["orbit", "Órbita", "Un círculo alrededor de un punto", () => addComponent(newOrbitComponent())],
+    ["upload", "Mapa desde KML o KMZ", "Importa el área de un archivo", () => importKml("component")],
+  ];
+  for (const [icon, title, detail, action] of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.innerHTML = `<svg><use href="#i-${icon}" /></svg><span><b></b><small></small></span>`;
+    button.querySelector("b").textContent = title;
+    button.querySelector("small").textContent = detail;
+    button.addEventListener("click", () => {
+      menu.remove();
+      action();
+    });
+    menu.append(button);
+  }
+  anchor.after(menu);
+}
+
+document.addEventListener("click", (event) => {
+  const menu = $("add-menu");
+  if (menu && !menu.contains(event.target)) menu.remove();
+});
+
+function addComponent(component) {
+  remember();
+  current.components.push(component);
+  save();
+  showView(component.id);
+  const points = planPoints({ ...current, components: [component], takeoff: null });
+  if (points.length) fitTo(points);
+}
+
+// ---------- Panel del componente ----------
+
+function buildComponentHeader(component) {
+  const index = current.components.indexOf(component);
+  const badge = $("component-badge");
+  badge.querySelector("use").setAttribute("href", `#i-${typeIcon(component)}`);
+  badge.querySelector(".n").textContent = String(index + 1);
+  badge.classList.toggle("off", !component.enabled);
+  $("component-name").value = component.name ?? "";
+  $("component-name").placeholder = componentName({ ...component, name: null });
+  $("comp-enabled").querySelector("use").setAttribute("href", component.enabled ? "#i-eye" : "#i-eye-off");
+  $("comp-enabled").title = component.enabled ? "No volar este componente (se queda guardado)" : "Volver a volar este componente";
+  $("comp-enabled").classList.toggle("active", !component.enabled);
+  $("comp-off-note").hidden = component.enabled;
+  $("comp-up").disabled = index === 0;
+  $("comp-down").disabled = index === current.components.length - 1;
+}
+
+/** Cambia el plan desde los botones del componente y vuelve a dibujar todo. */
+function changePlan(change, view = selectedId) {
+  remember();
+  change();
+  save();
+  showView(view);
+}
+
+$("comp-enabled").addEventListener("click", () => {
+  const component = selected();
+  if (component) changePlan(() => (component.enabled = !component.enabled));
+});
+
+function moveSelected(delta) {
+  const index = current.components.findIndex((c) => c.id === selectedId);
+  const to = index + delta;
+  if (index < 0 || to < 0 || to >= current.components.length) return;
+  changePlan(() => {
+    const [component] = current.components.splice(index, 1);
+    current.components.splice(to, 0, component);
+  });
+}
+
+$("comp-up").addEventListener("click", () => moveSelected(-1));
+$("comp-down").addEventListener("click", () => moveSelected(1));
+
+$("comp-duplicate").addEventListener("click", () => {
+  const component = selected();
+  if (!component) return;
+  const copy = copyComponent(component);
+  if (copy.name) copy.name = `${copy.name} (copia)`;
+  changePlan(() => current.components.splice(current.components.indexOf(component) + 1, 0, copy), copy.id);
+  toast("Duplicado: arrastra su centro para moverlo");
+});
+
+$("comp-delete").addEventListener("click", () => {
+  const component = selected();
+  if (!component || !confirm(`¿Quitar «${componentName(component)}» de la misión?`)) return;
+  changePlan(() => current.components.splice(current.components.indexOf(component), 1), null);
+});
+
+$("component-name").addEventListener("input", (event) => {
+  const component = selected();
+  if (!component) return;
+  component.name = event.target.value.trim() || null;
+  save();
+});
+$("component-name").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") event.target.blur();
+});
+$("component-back").addEventListener("click", () => showView(null));
+$("component-done").addEventListener("click", () => showView(null));
+
+function buildMapParams(params, c) {
+  const plan = () => selectedItem()?.result ?? MapPlanner.plan(c);
+  const photos = c.captureMode === "photo";
+  const byDistance = photos && c.capturePriority !== "time";
 
   section(params, "VUELO");
-  numberParam(params, {
+  numberParam(params, c, {
     key: "altitude",
     label: "Altura sobre el despegue",
     unit: "m",
@@ -827,11 +1231,11 @@ function buildMapParams(params) {
     max: 120,
     slider: true,
     help: () => {
-      const [w, h] = MapPlanner.footprint(cameraFor(current), current.altitude);
+      const [w, h] = MapPlanner.footprint(cameraFor(c), c.altitude);
       return `GSD ${num(plan().gsdCmPerPx, 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`;
     },
   });
-  numberParam(params, {
+  numberParam(params, c, {
     key: "maxSpeed",
     label: "Velocidad máxima",
     unit: "km/h",
@@ -842,34 +1246,33 @@ function buildMapParams(params) {
     decimals: 1,
     help: () => {
       const speed = plan().speed;
-      const limited = speed < current.maxSpeed - 0.05;
+      const limited = speed < c.maxSpeed - 0.05;
       return `Volará a ${num(speed * KMH, 1)} km/h${limited ? ", limitada por el tiempo entre fotos" : ""}`;
     },
   });
-  choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
 
   section(params, "CAPTURA");
-  choiceParam(params, { key: "captureMode", label: "Durante las líneas", options: CAPTURE_MODES, rebuild: true });
+  choiceParam(params, c, { key: "captureMode", label: "Durante las líneas", options: CAPTURE_MODES, rebuild: true });
   if (photos) {
-    choiceParam(params, {
+    choiceParam(params, c, {
       key: "photoSize",
       label: "Tamaño de foto",
       options: PHOTO_SIZES,
-      help: () => (current.photoSize === "12mp" ? "Menos detalle, pero guarda cada foto en unos 2 s" : "Más detalle; guarda cada foto en unos 5 s"),
+      help: () => (c.photoSize === "12mp" ? "Menos detalle, pero guarda cada foto en unos 2 s" : "Más detalle; guarda cada foto en unos 5 s"),
     });
-    choiceParam(params, {
+    choiceParam(params, c, {
       key: "capturePriority",
       label: "Tomar las fotos por",
       options: CAPTURE_PRIORITIES,
       rebuild: true,
       help: () =>
-        current.capturePriority === "time"
+        c.capturePriority === "time"
           ? "Una foto cada cierto tiempo a velocidad fija; arranca antes del área para tomar velocidad"
           : "La foto se toma al llegar a cada punto: traslape exacto aunque haya viento",
     });
-    numberParam(params, {
+    numberParam(params, c, {
       key: "minPhotoInterval",
-      label: current.capturePriority === "time" ? "Foto cada" : "Tiempo mínimo entre fotos",
+      label: c.capturePriority === "time" ? "Foto cada" : "Tiempo mínimo entre fotos",
       unit: "s",
       min: 1,
       max: 10,
@@ -878,13 +1281,13 @@ function buildMapParams(params) {
       help: () => "Lo más rápido que la cámara guarda cada foto",
     });
     if (byDistance) {
-      choiceParam(params, {
+      choiceParam(params, c, {
         key: "photoType",
         label: "Tipo de foto",
         options: PHOTO_TYPES,
-        help: () => (current.photoType === "single" ? "" : "Varias fotos con distinta exposición en cada punto, para HDR"),
+        help: () => (c.photoType === "single" ? "" : "Varias fotos con distinta exposición en cada punto, para HDR"),
       });
-      numberParam(params, {
+      numberParam(params, c, {
         key: "captureSpeed",
         label: "Velocidad al tomar la foto",
         unit: "km/h",
@@ -896,18 +1299,18 @@ function buildMapParams(params) {
         optional: true,
         placeholder: "Sin frenar",
         help: () =>
-          current.captureSpeed === null
+          c.captureSpeed === null
             ? "Déjalo vacío para no frenar; 0 = se detiene en cada foto"
-            : current.captureSpeed === 0
+            : c.captureSpeed === 0
               ? "Se detiene en cada foto: más nítidas, vuelo más largo"
               : "Frena en cada foto: más nítidas, vuelo más largo",
       });
-      toggleParam(params, { key: "verifyFileCreated", label: "Comprobar cada foto", help: "Si una foto no se guardó, la repite antes de seguir" });
+      toggleParam(params, c, { key: "verifyFileCreated", label: "Comprobar cada foto", help: "Si una foto no se guardó, la repite antes de seguir" });
     }
   }
 
   section(params, "ESPACIADO");
-  choiceParam(params, {
+  choiceParam(params, c, {
     key: "spacing",
     label: "Separar por",
     options: SPACING_MODES,
@@ -915,16 +1318,16 @@ function buildMapParams(params) {
     onChange: (value) => {
       if (value !== "distance") return;
       // Empieza con la separación que daba el traslape.
-      const before = MapPlanner.plan({ ...current, spacing: "overlap" });
-      current.frontDistance = Math.round(before.photoSpacing * 10) / 10;
-      current.sideDistance = Math.round(before.lineSpacing * 10) / 10;
+      const before = MapPlanner.plan({ ...c, spacing: "overlap" });
+      c.frontDistance = Math.round(before.photoSpacing * 10) / 10;
+      c.sideDistance = Math.round(before.lineSpacing * 10) / 10;
     },
   });
-  if (current.spacing === "distance") {
-    numberParam(params, { key: "frontDistance", label: "Entre fotos", unit: "m", min: 0.5, max: 200, step: 0.5, decimals: 1 });
-    numberParam(params, { key: "sideDistance", label: "Entre líneas", unit: "m", min: 1, max: 200, step: 0.5, decimals: 1 });
+  if (c.spacing === "distance") {
+    numberParam(params, c, { key: "frontDistance", label: "Entre fotos", unit: "m", min: 0.5, max: 200, step: 0.5, decimals: 1 });
+    numberParam(params, c, { key: "sideDistance", label: "Entre líneas", unit: "m", min: 1, max: 200, step: 0.5, decimals: 1 });
   } else {
-    numberParam(params, {
+    numberParam(params, c, {
       key: "frontOverlap",
       label: "Traslape frontal",
       unit: "%",
@@ -933,7 +1336,7 @@ function buildMapParams(params) {
       slider: true,
       help: () => `Una foto cada ${num(plan().photoSpacing, 1)} m`,
     });
-    numberParam(params, {
+    numberParam(params, c, {
       key: "sideOverlap",
       label: "Traslape lateral",
       unit: "%",
@@ -945,8 +1348,8 @@ function buildMapParams(params) {
   }
 
   section(params, "CUADRÍCULA");
-  choiceParam(params, { key: "pattern", label: "Patrón", options: MAP_PATTERNS });
-  const direction = numberParam(params, {
+  choiceParam(params, c, { key: "pattern", label: "Patrón", options: MAP_PATTERNS });
+  const direction = numberParam(params, c, {
     key: "direction",
     label: "Dirección de las líneas",
     unit: "°",
@@ -957,21 +1360,29 @@ function buildMapParams(params) {
   });
   const setDirection = (value) => {
     remember();
-    current.direction = value;
+    c.direction = value;
     direction.show(value);
     save();
     redrawShapes();
   };
   buttonParam(params, "Alinear con el lado más largo", () => {
-    const best = MapPlanner.longestEdgeDirection(current.boundary);
+    const best = MapPlanner.longestEdgeDirection(c.boundary);
     if (best === null) toast("Primero marca el área en el mapa");
     else setDirection(best);
   });
-  buttonParam(params, "Girar 90°", () => setDirection((Math.round(current.direction) + 90) % 360));
-  note(params, "Para empezar por otra esquina, arrastra el punto verde de Inicio hasta ella.");
+  buttonParam(params, "Girar 90°", () => setDirection((Math.round(c.direction) + 90) % 360));
+  if (c.start) {
+    note(params, "Empieza en la esquina donde pusiste el pin azul.");
+    buttonParam(params, "Empezar en la esquina más cercana (automático)", () => {
+      editGeometry(() => (c.start = null));
+      buildPanel();
+    });
+  } else {
+    note(params, "Empieza en la esquina más cerca de donde viene el dron. Para escoger otra, arrastra el pin azul hasta ella.");
+  }
 
   section(params, "RUMBO Y GIMBAL");
-  choiceParam(params, {
+  choiceParam(params, c, {
     key: "heading",
     label: "El dron mira",
     options: MAP_HEADINGS,
@@ -982,38 +1393,38 @@ function buildMapParams(params) {
         left: "A la izquierda de la línea, sin girar entre líneas",
         right: "A la derecha de la línea, sin girar entre líneas",
         custom: "",
-      })[current.heading],
+      })[c.heading],
   });
-  if (current.heading === "custom") {
-    numberParam(params, { key: "headingAngle", label: "Ángulo", unit: "°", min: 0, max: 359, slider: true });
-    choiceParam(params, {
+  if (c.heading === "custom") {
+    numberParam(params, c, { key: "headingAngle", label: "Ángulo", unit: "°", min: 0, max: 359, slider: true });
+    choiceParam(params, c, {
       key: "headingReference",
       label: "Medido",
       options: HEADING_REFERENCES,
-      help: () => (current.headingReference === "north" ? "Mismo rumbo en todas las líneas (0° = norte)" : "Gira con cada línea (0° = adelante)"),
+      help: () => (c.headingReference === "north" ? "Mismo rumbo en todas las líneas (0° = norte)" : "Gira con cada línea (0° = adelante)"),
     });
   }
-  numberParam(params, {
+  numberParam(params, c, {
     key: "gimbalPitch",
     label: "Inclinación del gimbal",
     unit: "°",
     min: -90,
     max: 0,
     slider: true,
-    help: () => (current.gimbalPitch <= -89 ? "-90° = mirando hacia abajo" : "Fotos oblicuas, útiles para fachadas y modelos 3D"),
+    help: () => (c.gimbalPitch <= -89 ? "-90° = mirando hacia abajo" : "Fotos oblicuas, útiles para fachadas y modelos 3D"),
   });
 
-  if (current.captureMode !== "none") cameraSettingsParams(params, { photo: photos });
+  if (c.captureMode !== "none") cameraSettingsParams(params, c, { photo: photos });
 
   section(params, "SEGURIDAD");
-  toggleParam(params, { key: "highWindTolerance", label: "Tolerancia a viento fuerte", help: "Corrige más fuerte cuando el viento lo saca de la línea" });
+  toggleParam(params, c, { key: "highWindTolerance", label: "Tolerancia a viento fuerte", help: "Corrige más fuerte cuando el viento lo saca de la línea" });
 }
 
-function buildOrbitParams(params) {
+function buildOrbitParams(params, c) {
   section(params, "ÓRBITA");
-  numberParam(params, { key: "radius", label: "Radio", unit: "m", min: 5, max: 500, slider: true });
-  numberParam(params, { key: "altitude", label: "Altura sobre el despegue", unit: "m", min: 5, max: 120, slider: true });
-  choiceParam(params, {
+  numberParam(params, c, { key: "radius", label: "Radio", unit: "m", min: 5, max: 500, slider: true });
+  numberParam(params, c, { key: "altitude", label: "Altura sobre el despegue", unit: "m", min: 5, max: 120, slider: true });
+  choiceParam(params, c, {
     key: "clockwise",
     label: "Sentido",
     options: [
@@ -1021,16 +1432,16 @@ function buildOrbitParams(params) {
       [false, "Antihorario"],
     ],
   });
-  numberParam(params, {
+  numberParam(params, c, {
     key: "rotations",
     label: "Vueltas",
     min: 0.05,
     max: 10,
     step: 0.05,
     decimals: 2,
-    help: () => `Recorre ${num(current.rotations * 360)}° alrededor del centro`,
+    help: () => `Recorre ${num(c.rotations * 360)}° alrededor del centro`,
   });
-  numberParam(params, {
+  numberParam(params, c, {
     key: "speed",
     label: "Velocidad",
     unit: "km/h",
@@ -1039,21 +1450,32 @@ function buildOrbitParams(params) {
     max: 43,
     step: 0.5,
     decimals: 1,
-    help: () => `${num(OrbitPlanner.angularSpeed(current.radius, current.speed), 1)}° por segundo alrededor del centro`,
+    help: () => `${num(OrbitPlanner.angularSpeed(c.radius, c.speed), 1)}° por segundo alrededor del centro`,
   });
-  choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
-  note(params, "Arrastra el cuadrito azul para cambiar el radio y el punto donde empieza.");
+  numberParam(params, c, {
+    key: "startBearing",
+    label: "Empieza en el rumbo",
+    unit: "°",
+    min: 0,
+    max: 359,
+    optional: true,
+    placeholder: "Automático",
+    help: () =>
+      c.startBearing === null
+        ? "Vacío: en el punto del círculo más cerca de donde viene el dron. También puedes arrastrar el pin azul."
+        : "0° = al norte del centro · 90° = al este. Bórralo para que sea automático.",
+  });
 
   section(params, "ESPIRAL (OPCIONAL)");
-  numberParam(params, { key: "finalAltitude", label: "Altura final", unit: "m", min: 5, max: 120, optional: true, placeholder: "Igual" });
-  numberParam(params, { key: "finalRadius", label: "Radio final", unit: "m", min: 5, max: 500, optional: true, placeholder: "Igual" });
+  numberParam(params, c, { key: "finalAltitude", label: "Altura final", unit: "m", min: 5, max: 120, optional: true, placeholder: "Igual" });
+  numberParam(params, c, { key: "finalRadius", label: "Radio final", unit: "m", min: 5, max: 500, optional: true, placeholder: "Igual" });
 
   section(params, "RUMBO Y GIMBAL");
-  selectParam(params, { key: "heading", label: "El dron mira", options: ORBIT_HEADINGS, rebuild: true });
-  if (current.heading === "custom") {
-    numberParam(params, { key: "headingAngle", label: "Rumbo", unit: "°", min: 0, max: 359, slider: true, help: () => "0° = norte · 90° = este" });
+  selectParam(params, c, { key: "heading", label: "El dron mira", options: ORBIT_HEADINGS, rebuild: true });
+  if (c.heading === "custom") {
+    numberParam(params, c, { key: "headingAngle", label: "Rumbo", unit: "°", min: 0, max: 359, slider: true, help: () => "0° = norte · 90° = este" });
   }
-  numberParam(params, {
+  numberParam(params, c, {
     key: "poiAltitude",
     label: "Altura del objetivo",
     unit: "m",
@@ -1062,24 +1484,22 @@ function buildOrbitParams(params) {
     optional: true,
     placeholder: "Sin objetivo",
     help: () =>
-      current.poiAltitude === null
-        ? "Con un objetivo en el centro, el gimbal lo sigue solo"
-        : `El gimbal apunta al objetivo: ${num(OrbitPlanner.gimbalPitch(current))}°`,
+      c.poiAltitude === null ? "Con un objetivo en el centro, el gimbal lo sigue solo" : `El gimbal apunta al objetivo: ${num(OrbitPlanner.gimbalPitch(c))}°`,
   });
-  numberParam(params, {
+  numberParam(params, c, {
     key: "gimbalPitch",
     label: "Inclinación del gimbal",
     unit: "°",
     min: -90,
     max: 30,
     slider: true,
-    help: () => (current.poiAltitude === null ? "0° = al horizonte · -90° = hacia abajo" : "No se usa: el gimbal apunta al objetivo"),
+    help: () => (c.poiAltitude === null ? "0° = al horizonte · -90° = hacia abajo" : "No se usa: el gimbal apunta al objetivo"),
   });
 
   section(params, "CAPTURA");
-  choiceParam(params, { key: "captureMode", label: "Durante la órbita", options: CAPTURE_MODES, rebuild: true });
-  if (current.captureMode === "photo") {
-    numberParam(params, {
+  choiceParam(params, c, { key: "captureMode", label: "Durante la órbita", options: CAPTURE_MODES, rebuild: true });
+  if (c.captureMode === "photo") {
+    numberParam(params, c, {
       key: "photoInterval",
       label: "Foto cada",
       unit: "s",
@@ -1087,51 +1507,51 @@ function buildOrbitParams(params) {
       max: 60,
       step: 0.5,
       decimals: 1,
-      help: () => `Unas ${OrbitPlanner.plan(current)?.photoCount ?? 0} fotos`,
+      help: () => `Unas ${selectedItem()?.result?.photoCount ?? 0} fotos`,
     });
-    choiceParam(params, { key: "photoSize", label: "Tamaño de foto", options: PHOTO_SIZES });
+    choiceParam(params, c, { key: "photoSize", label: "Tamaño de foto", options: PHOTO_SIZES });
   }
-  if (current.captureMode !== "none") cameraSettingsParams(params, { photo: current.captureMode === "photo" });
+  if (c.captureMode !== "none") cameraSettingsParams(params, c, { photo: c.captureMode === "photo" });
 }
 
-/** Ajustes que la misión pone en la cámara al empezar. "Sin cambiar" deja lo que tenga la cámara. */
-function cameraSettingsParams(params, { photo }) {
+/** Ajustes que el componente pone en la cámara al empezar. "Sin cambiar" deja lo que tenga la cámara. */
+function cameraSettingsParams(params, c, { photo }) {
   section(params, "AJUSTES DE CÁMARA");
   note(params, "“Sin cambiar” deja el ajuste que ya tenga la cámara.");
   if (photo) {
-    selectParam(params, { key: "photoFormat", label: "Formato", options: PHOTO_FORMATS, unset: true });
-    selectParam(params, { key: "photoRatio", label: "Relación de aspecto", options: PHOTO_RATIOS, unset: true });
+    selectParam(params, c, { key: "photoFormat", label: "Formato", options: PHOTO_FORMATS, unset: true });
+    selectParam(params, c, { key: "photoRatio", label: "Relación de aspecto", options: PHOTO_RATIOS, unset: true });
   } else {
-    selectParam(params, { key: "videoResolution", label: "Resolución", options: VIDEO_RESOLUTIONS, unset: true });
-    selectParam(params, { key: "frameRate", label: "Cuadros por segundo", options: FRAME_RATES, unset: true });
-    selectParam(params, { key: "colorProfile", label: "Perfil de color", options: COLOR_PROFILES, unset: true });
+    selectParam(params, c, { key: "videoResolution", label: "Resolución", options: VIDEO_RESOLUTIONS, unset: true });
+    selectParam(params, c, { key: "frameRate", label: "Cuadros por segundo", options: FRAME_RATES, unset: true });
+    selectParam(params, c, { key: "colorProfile", label: "Perfil de color", options: COLOR_PROFILES, unset: true });
   }
-  selectParam(params, { key: "exposureMode", label: "Exposición", options: EXPOSURE_MODES, unset: true, rebuild: true });
-  if (current.exposureMode === "auto") {
-    selectParam(params, { key: "ev", label: "Compensación (EV)", options: EV_VALUES, unset: true });
-  } else if (current.exposureMode === "manual") {
-    selectParam(params, { key: "iso", label: "ISO", options: ISO_VALUES, unset: true });
-    selectParam(params, { key: "shutter", label: "Obturador", options: SHUTTER_VALUES, unset: true });
+  selectParam(params, c, { key: "exposureMode", label: "Exposición", options: EXPOSURE_MODES, unset: true, rebuild: true });
+  if (c.exposureMode === "auto") {
+    selectParam(params, c, { key: "ev", label: "Compensación (EV)", options: EV_VALUES, unset: true });
+  } else if (c.exposureMode === "manual") {
+    selectParam(params, c, { key: "iso", label: "ISO", options: ISO_VALUES, unset: true });
+    selectParam(params, c, { key: "shutter", label: "Obturador", options: SHUTTER_VALUES, unset: true });
   }
-  selectParam(params, {
+  selectParam(params, c, {
     key: "whiteBalance",
     label: "Balance de blancos",
     options: WHITE_BALANCES,
     unset: true,
     rebuild: true,
     onChange: (value) => {
-      if (value === "custom" && current.whiteBalanceKelvin === null) current.whiteBalanceKelvin = 5500;
+      if (value === "custom" && c.whiteBalanceKelvin === null) c.whiteBalanceKelvin = 5500;
     },
   });
-  if (current.whiteBalance === "custom") {
-    numberParam(params, { key: "whiteBalanceKelvin", label: "Temperatura", unit: "K", min: 2000, max: 10000, step: 100, slider: true });
+  if (c.whiteBalance === "custom") {
+    numberParam(params, c, { key: "whiteBalanceKelvin", label: "Temperatura", unit: "K", min: 2000, max: 10000, step: 100, slider: true });
   }
-  selectParam(params, {
+  selectParam(params, c, {
     key: "focusMode",
     label: "Enfoque",
     options: FOCUS_MODES,
     unset: true,
-    help: () => (current.focusMode === "infinity" ? "Enfoque fijo al infinito: bueno para mapas a más de 10 m" : ""),
+    help: () => (c.focusMode === "infinity" ? "Enfoque fijo al infinito: bueno para mapas a más de 10 m" : ""),
   });
 }
 
@@ -1139,21 +1559,29 @@ function cameraSettingsParams(params, { photo }) {
 
 function nextName(type) {
   const base = type === "map" ? "Mapa" : "Órbita";
-  const count = Object.values(state.missions).filter((m) => m.type === type).length;
+  const count = Object.values(state.missions).filter((m) => m.components[0]?.type === type).length;
   return `${base} ${count + 1}`;
 }
 
 $("new-map").addEventListener("click", () => {
-  const mission = newMapMission(nextName("map"));
-  openEditor(mission.id, mission);
+  const component = newMapComponent();
+  openPlan(null, newPlan(nextName("map"), [component]), component.id);
 });
 
 $("new-orbit").addEventListener("click", () => {
-  const mission = newOrbitMission(nextName("orbit"));
-  openEditor(mission.id, mission);
+  const component = newOrbitComponent();
+  openPlan(null, newPlan(nextName("orbit"), [component]), component.id);
 });
 
-$("import-kml").addEventListener("click", () => $("kml-file").click());
+/** Dónde va el área del próximo KML: una misión nueva ("plan") o un componente del plan abierto. */
+let kmlTarget = "plan";
+
+function importKml(target) {
+  kmlTarget = target;
+  $("kml-file").click();
+}
+
+$("import-kml").addEventListener("click", () => importKml("plan"));
 $("kml-file").addEventListener("change", async (event) => {
   const file = event.target.files[0];
   event.target.value = "";
@@ -1165,14 +1593,19 @@ $("kml-file").addEventListener("change", async (event) => {
       toast("Ese archivo no tiene un área (polígono) que se pueda usar", true);
       return;
     }
-    const mission = newMapMission(result.name || file.name.replace(/\.km[lz]$/i, ""), result.points);
-    mission.direction = MapPlanner.longestEdgeDirection(mission.boundary) ?? 0;
-    state.missions[mission.id] = mission;
-    state.dirty[mission.id] = true;
-    persist();
-    scheduleSync();
-    openEditor(mission.id);
-    toast(`Área importada: ${mission.boundary.length} esquinas`);
+    const component = newMapComponent(result.points);
+    component.direction = MapPlanner.longestEdgeDirection(component.boundary) ?? 0;
+    if (kmlTarget === "component" && current) {
+      addComponent(component);
+    } else {
+      const plan = newPlan(result.name || file.name.replace(/\.km[lz]$/i, ""), [component]);
+      state.missions[plan.id] = plan;
+      state.dirty[plan.id] = true;
+      persist();
+      scheduleSync();
+      openPlan(plan.id, null, component.id);
+    }
+    toast(`Área importada: ${component.boundary.length} esquinas`);
   } catch (error) {
     toast(`No se pudo leer el archivo: ${error.message}`, true);
   }
@@ -1196,43 +1629,51 @@ async function readKml(file) {
   return entry ? entry.async("string") : null;
 }
 
-$("editor-delete").addEventListener("click", () => {
+$("plan-delete").addEventListener("click", () => {
   if (!current || !confirm(`¿Borrar «${current.name}»? También se borra del teléfono.`)) return;
   const id = current.id;
   if (state.shas[id]) state.deleted[id] = current.name;
   delete state.missions[id];
   delete state.dirty[id];
   persist();
-  current = { ...current, boundary: [], center: null }; // Para que closeEditor no la vuelva a guardar.
+  current = { ...current, components: [] }; // Para que closeEditor no la vuelva a guardar.
   closeEditor();
   scheduleSync();
 });
 
-$("editor-name").addEventListener("input", (event) => {
+$("plan-name").addEventListener("input", (event) => {
   const name = event.target.value.trim();
   if (!current || !name) return;
   current.name = name;
   save();
-  $("editor-summary").textContent = summary(current);
 });
-$("editor-name").addEventListener("keydown", (event) => {
+$("plan-name").addEventListener("keydown", (event) => {
   if (event.key === "Enter") event.target.blur();
 });
-$("editor-back").addEventListener("click", closeEditor);
-$("editor-done").addEventListener("click", closeEditor);
+$("plan-back").addEventListener("click", closeEditor);
+$("plan-done").addEventListener("click", closeEditor);
 
 // ---------- Herramientas del mapa ----------
 
 $("tool-undo").addEventListener("click", undo);
 $("tool-redo").addEventListener("click", redo);
 $("tool-clear").addEventListener("click", () => {
-  if (!current || geometry(current).length === 0) return;
+  const component = selected();
+  if (!component) return;
   editGeometry(() => {
-    if (current.type === "map") current.boundary = [];
-    else current.center = null;
+    if (component.type === "map") {
+      component.boundary = [];
+      component.start = null;
+    } else {
+      component.center = null;
+    }
   });
 });
-$("tool-fit").addEventListener("click", () => (current ? fitTo(missionPoints(current)) : fitAll()));
+$("tool-fit").addEventListener("click", () => {
+  if (!current) return fitAll();
+  const component = selected();
+  fitTo(planPoints(component ? { ...current, components: [component], takeoff: null } : current));
+});
 $("tool-locate").addEventListener("click", () => {
   if (!navigator.geolocation) return toast("Este navegador no da la ubicación", true);
   navigator.geolocation.getCurrentPosition(
@@ -1285,8 +1726,11 @@ document.addEventListener("keydown", (event) => {
     redo();
   } else if (event.key === "Escape" && !$("layer-menu").hidden) {
     $("layer-menu").hidden = true;
+  } else if (event.key === "Escape" && $("add-menu")) {
+    $("add-menu").remove();
   } else if (event.key === "Escape" && !typing && current && !$("sync-dialog").open) {
-    closeEditor();
+    if (selectedId) showView(null);
+    else closeEditor();
   }
 });
 
@@ -1416,9 +1860,7 @@ async function runSync() {
         current = clone(latest);
         undoStack = [];
         redoStack = [];
-        $("editor-name").value = current.name;
-        buildParams();
-        refresh();
+        showView(selectedId);
         toast("La misión se actualizó con cambios del teléfono");
       }
     }
@@ -1484,15 +1926,9 @@ setInterval(() => {
 // ---------- Inicio ----------
 
 renderList();
-const fromHash = location.hash.match(/^#m\/(.+)$/)?.[1];
-if (fromHash && state.missions[fromHash]) {
-  map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
-  openEditor(fromHash);
-} else if (Object.keys(state.missions).length) {
-  map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
-  fitAll();
-} else {
-  map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
-}
+const [, fromHash, componentFromHash] = location.hash.match(/^#m\/([^/]+)(?:\/(.+))?$/) ?? [];
+map.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+if (fromHash && state.missions[fromHash]) openPlan(fromHash, null, componentFromHash);
+else if (Object.keys(state.missions).length) fitAll();
 if (token) runSync();
 else setChip("off", "Conectar teléfono");

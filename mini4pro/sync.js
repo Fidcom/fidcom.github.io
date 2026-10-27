@@ -1,6 +1,6 @@
 // Sincronización con GitHub: un archivo JSON por misión en la rama "misiones" de Fidcom/mini4pro-app,
 // la misma que lee la app del teléfono. El token se guarda solo en este navegador.
-import { normalizeMission, serializeMission } from "./planner.js";
+import { normalizePlan, serializePlan } from "./planner.js?v=20261027b";
 
 const REPO = "Fidcom/mini4pro-app";
 const BRANCH = "misiones";
@@ -79,7 +79,7 @@ export class GitHubSync {
       files.map(async (file) => {
         const blob = await this.request(`/repos/${REPO}/git/blobs/${file.sha}`);
         try {
-          return { sha: file.sha, mission: normalizeMission(JSON.parse(decodeBase64(blob.content))) };
+          return { sha: file.sha, mission: normalizePlan(JSON.parse(decodeBase64(blob.content))) };
         } catch {
           return null; // Un archivo dañado no detiene la sincronización.
         }
@@ -92,7 +92,7 @@ export class GitHubSync {
   async save(mission, sha) {
     const body = {
       message: `Misión: ${mission.name}`,
-      content: encodeBase64(serializeMission(mission)),
+      content: encodeBase64(serializePlan(mission)),
       branch: BRANCH,
       ...(sha ? { sha } : {}),
     };
