@@ -63,8 +63,10 @@ import {
   takeoffOf,
   typeName,
   waypointHeading,
-} from "./planner.js?v=20261028b";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261028b";
+  TerrainFollow,
+} from "./planner.js?v=20261028c";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261028c";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261028c";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -588,6 +590,7 @@ function editGeometry(change) {
 }
 
 function refresh() {
+  loadTerrain();
   redrawShapes();
   drawHandles();
   updateHint();
@@ -1468,7 +1471,7 @@ function selectParam(params, obj, { key, label, options, unset = false, help, re
 }
 
 /** Un interruptor de sí o no. */
-function toggleParam(params, obj, { key, label, help }) {
+function toggleParam(params, obj, { key, label, help, rebuild = false }) {
   const el = document.createElement("label");
   el.className = "param toggle";
   el.innerHTML = `
@@ -1479,7 +1482,7 @@ function toggleParam(params, obj, { key, label, help }) {
   const input = el.querySelector("input");
   input.id = `param-${key}`;
   input.checked = Boolean(obj[key]);
-  input.addEventListener("change", () => setChoice(obj, key, input.checked));
+  input.addEventListener("change", () => setChoice(obj, key, input.checked, { rebuild }));
   params.append(el);
 }
 
@@ -1740,18 +1743,20 @@ function buildMapParams(params, c) {
   const byDistance = photos && c.capturePriority !== "time";
 
   section(params, "VUELO");
+  terrainToggle(params, c);
   numberParam(params, c, {
     key: "altitude",
-    label: "Altura sobre el despegue",
+    label: altitudeLabel(c),
     unit: "m",
     min: 5,
     max: 120,
     slider: true,
     help: () => {
       const [w, h] = MapPlanner.footprint(cameraFor(c), c.altitude);
-      return `GSD ${num(plan().gsdCmPerPx, 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`;
+      return withTerrain(c, `GSD ${num(plan().gsdCmPerPx, 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`);
     },
   });
+  terrainChart(params, c);
   numberParam(params, c, {
     key: "maxSpeed",
     label: "Velocidad máxima",
@@ -1959,18 +1964,20 @@ function buildCorridorParams(params, c) {
   note(params, "Empieza en el extremo más cerca de donde viene el dron y va y vuelve por pasadas paralelas a la línea, mirando hacia adelante.");
 
   section(params, "VUELO");
+  terrainToggle(params, c);
   numberParam(params, c, {
     key: "altitude",
-    label: "Altura sobre el despegue",
+    label: altitudeLabel(c),
     unit: "m",
     min: 5,
     max: 120,
     slider: true,
     help: () => {
       const [w, h] = MapPlanner.footprint(cameraFor(c), c.altitude);
-      return `GSD ${num(MapPlanner.gsd(cameraFor(c), c.altitude), 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`;
+      return withTerrain(c, `GSD ${num(MapPlanner.gsd(cameraFor(c), c.altitude), 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`);
     },
   });
+  terrainChart(params, c);
   numberParam(params, c, {
     key: "maxSpeed",
     label: "Velocidad máxima",
@@ -2209,13 +2216,15 @@ function buildWaypointsParams(params, c) {
     decimals: 1,
     help: () => "Entre un punto y el siguiente; frena en cada uno",
   });
+  terrainToggle(params, c);
   numberParam(params, c, {
     key: "altitude",
     label: "Altura de los puntos nuevos",
     unit: "m",
     min: 5,
     max: 120,
-    help: () => "Sobre el despegue. Cada punto nuevo toma la del anterior; el primero, esta.",
+    help: () =>
+      withTerrain(c, `${c.terrainFollow ? "Sobre el suelo de cada punto" : "Sobre el despegue"}. Cada punto nuevo toma la del anterior; el primero, esta.`),
   });
   if (c.points.length >= 2) {
     buttonParam(params, "Poner todos los puntos a esa altura", () => {
@@ -2223,6 +2232,7 @@ function buildWaypointsParams(params, c) {
       buildPanel();
     });
   }
+  terrainChart(params, c);
 
   section(params, "GIMBAL");
   numberParam(params, c, {
@@ -2274,7 +2284,7 @@ function buildWaypointParams(params, c, index) {
     ["‹ Anterior", index > 0 ? () => selectPoint(index - 1) : null],
     ["Siguiente ›", index < count - 1 ? () => selectPoint(index + 1) : null],
   ]);
-  numberParam(params, point, { key: "altitude", label: "Altura sobre el despegue", unit: "m", min: 5, max: 120, slider: true, handles: true });
+  numberParam(params, point, { key: "altitude", label: altitudeLabel(c), unit: "m", min: 5, max: 120, slider: true, handles: true });
   choiceParam(params, point, {
     key: "action",
     label: "Al llegar",
@@ -2323,7 +2333,8 @@ function buildWaypointParams(params, c, index) {
 function buildPhotoParams(params, c) {
   section(params, "FOTO");
   if (!c.position) note(params, "Haz clic en el mapa donde quieres tomar la foto.");
-  numberParam(params, c, { key: "altitude", label: "Altura sobre el despegue", unit: "m", min: 5, max: 120, slider: true });
+  terrainToggle(params, c);
+  numberParam(params, c, { key: "altitude", label: altitudeLabel(c), unit: "m", min: 5, max: 120, slider: true, help: () => withTerrain(c, "") });
   numberParam(params, c, {
     key: "heading",
     label: "Rumbo",
@@ -2356,7 +2367,8 @@ function buildPanoParams(params, c) {
     rebuild: true,
     help: () => `${PANO_DESCRIPTIONS[c.panoType]} Toma ${shots().length} fotos.`,
   });
-  numberParam(params, c, { key: "altitude", label: "Altura sobre el despegue", unit: "m", min: 5, max: 120, slider: true });
+  terrainToggle(params, c);
+  numberParam(params, c, { key: "altitude", label: altitudeLabel(c), unit: "m", min: 5, max: 120, slider: true, help: () => withTerrain(c, "") });
   if (c.panoType !== "sphere") {
     numberParam(params, c, {
       key: "heading",
@@ -2386,6 +2398,255 @@ function buildPanoParams(params, c) {
   choiceParam(params, c, { key: "photoSize", label: "Tamaño de foto", options: PHOTO_SIZES });
   note(params, "Quieto en el punto, gira el dron y la cámara y toma las fotos una por una. Se guardan por separado: únelas en la computadora, por ejemplo con Hugin o Lightroom.");
   cameraSettingsParams(params, c, { photo: true });
+}
+
+// ---------- Seguir el terreno ----------
+
+/** No se pudo bajar parte del suelo (sin internet o sin datos). */
+let terrainFailed = false;
+
+/** Baja el suelo de la zona si algún componente lo sigue; al llegar, actualiza las ayudas y el perfil. */
+function loadTerrain() {
+  if (!current || !TerrainFollow.needed(current)) return;
+  const plan = current;
+  ensureTerrain(planPoints(plan)).then((failed) => {
+    terrainFailed = failed > 0;
+    if (current === plan) helpUpdaters.forEach((update) => update());
+  });
+}
+
+/** El interruptor "Seguir el terreno", como en Dronelink: la altura pasa a medirse sobre el suelo de cada punto. */
+function terrainToggle(params, c) {
+  toggleParam(params, c, {
+    key: "terrainFollow",
+    label: "Seguir el terreno",
+    help: c.terrainFollow
+      ? "Usa el suelo sin árboles ni edificios (datos cada 10 m): deja margen para lo que haya encima"
+      : "Sube y baja con el suelo para mantener siempre la misma altura sobre él",
+    rebuild: true,
+  });
+}
+
+const altitudeLabel = (c) => (c.terrainFollow ? "Altura sobre el suelo" : "Altura sobre el despegue");
+
+/**
+ * El suelo bajo la ruta del componente y la altura del dron, sobre el despegue: {profile} cada
+ * 5 m, {message} si faltan los datos, o null si todavía no hay ruta.
+ */
+function terrainProfile(component) {
+  const path = planResult?.items.find((item) => item.component.id === component.id)?.result?.path;
+  const takeoff = takeoffOf(current);
+  if (!path?.length || !takeoff) return null;
+  const message = terrainLoading()
+    ? "Bajando los datos del terreno de la zona…"
+    : terrainFailed
+      ? "Sin datos del terreno: revisa la conexión a internet"
+      : "Sin datos del terreno de esta zona";
+  const base = terrain.elevation(takeoff);
+  if (base === null) return { message };
+  try {
+    const ref = TerrainFollow.reference(terrain, base);
+    return { profile: TerrainFollow.alongRoute(ref, path, TerrainFollow.aglAlong(component, path)) };
+  } catch {
+    return { message };
+  }
+}
+
+/** `text` y, siguiendo el terreno, cuánto cambia el suelo y entre qué alturas sobre el despegue vuela. */
+function withTerrain(c, text) {
+  if (!TerrainFollow.follows(c)) return text;
+  const result = terrainProfile(c);
+  if (!result) return text;
+  let line = result.message;
+  if (result.profile) {
+    const p = result.profile;
+    const low = Math.min(...p.map((s) => s.altitude));
+    const high = Math.max(...p.map((s) => s.altitude));
+    if (p.length === 1) {
+      const ground = p[0].ground;
+      line = `El suelo ahí está ${num(Math.abs(ground))} m ${ground >= 0 ? "por encima" : "por debajo"} del despegue: el dron queda a ${num(high)} m sobre el despegue`;
+    } else {
+      const rise = Math.max(...p.map((s) => s.ground)) - Math.min(...p.map((s) => s.ground));
+      line = `El suelo cambia ${num(rise)} m bajo la ruta: vuela entre ${num(low)} y ${num(high)} m sobre el despegue`;
+    }
+  }
+  return text ? `${text}\n${line}` : line;
+}
+
+const CHART_DRONE = "#2b8ff2";
+const CHART_GROUND = "#b5792a";
+const CHART_SURFACE = "#12171c";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Números redondos para el eje: unos 4 entre `low` y `high`. */
+function niceTicks(low, high) {
+  const raw = (high - low) / 4;
+  const power = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((k) => k * power).find((k) => k >= raw);
+  const ticks = [];
+  // + 0 convierte el -0 en 0.
+  for (let i = Math.ceil(low / step); i * step <= high + 1e-9; i++) ticks.push(i * step + 0);
+  return ticks;
+}
+
+function svgEl(name, attributes) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attributes)) el.setAttribute(key, value);
+  return el;
+}
+
+/**
+ * El perfil de la ruta como en Dronelink: el suelo y el dron a lo largo del recorrido, con una
+ * línea que sigue al puntero y la misma información en una tabla.
+ */
+function terrainChart(params, c) {
+  if (!c.terrainFollow) return;
+  const box = document.createElement("div");
+  box.className = "terrain-chart";
+  box.hidden = true;
+  params.append(box);
+  helpUpdaters.push(() => renderTerrainChart(box, c));
+}
+
+function renderTerrainChart(box, c) {
+  const profile = terrainProfile(c)?.profile;
+  box.hidden = !profile || profile.length < 2;
+  if (box.hidden) {
+    box.replaceChildren();
+    return;
+  }
+  const width = Math.max(240, box.clientWidth || 320);
+  const height = 132;
+  const pad = { left: 36, right: 8, top: 8, bottom: 20 };
+  const total = profile.at(-1).distance;
+  const grounds = profile.map((s) => s.ground);
+  const altitudes = profile.map((s) => s.altitude);
+  let low = Math.min(0, ...grounds);
+  let high = Math.max(0, ...altitudes);
+  const margin = Math.max(5, (high - low) * 0.08);
+  low -= margin;
+  high += margin;
+  const ticks = niceTicks(low, high);
+  low = Math.min(low, ticks[0]);
+  high = Math.max(high, ticks.at(-1));
+  const x = (d) => pad.left + (d / total) * (width - pad.left - pad.right);
+  const y = (h) => pad.top + ((high - h) / (high - low)) * (height - pad.top - pad.bottom);
+  const line = (key) => profile.map((s, i) => `${i ? "L" : "M"}${x(s.distance).toFixed(1)},${y(s[key]).toFixed(1)}`).join("");
+
+  const head = document.createElement("div");
+  head.className = "terrain-chart-head";
+  head.innerHTML = `
+    <span class="key"><i style="background:${CHART_DRONE}"></i>Dron</span>
+    <span class="key"><i style="background:${CHART_GROUND}"></i>Suelo</span>
+    <span class="unit">m sobre el despegue</span>`;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width, height, tabindex: 0, role: "img" });
+  svg.setAttribute("aria-label", `Perfil de la ruta: ${num(total)} m; el dron vuela entre ${num(Math.min(...altitudes))} y ${num(Math.max(...altitudes))} m sobre el despegue`);
+  for (const t of ticks) {
+    svg.append(svgEl("line", { x1: pad.left, x2: width - pad.right, y1: y(t), y2: y(t), class: t === 0 ? "grid zero" : "grid" }));
+    const label = svgEl("text", { x: pad.left - 6, y: y(t) + 4, class: "tick", "text-anchor": "end" });
+    label.textContent = num(t);
+    svg.append(label);
+  }
+  for (const [d, anchor] of [[0, "start"], [total, "end"]]) {
+    const label = svgEl("text", { x: x(d), y: height - 4, class: "tick", "text-anchor": anchor });
+    label.textContent = distanceText(d);
+    svg.append(label);
+  }
+  const bottom = y(low);
+  svg.append(svgEl("path", { d: `${line("ground")}L${x(total).toFixed(1)},${bottom}L${x(0).toFixed(1)},${bottom}Z`, fill: CHART_GROUND, "fill-opacity": 0.14 }));
+  svg.append(svgEl("path", { d: line("ground"), class: "series", stroke: CHART_GROUND }));
+  svg.append(svgEl("path", { d: line("altitude"), class: "series", stroke: CHART_DRONE }));
+
+  // La línea que sigue al puntero (o a las flechas del teclado) y lo que hay en ese punto.
+  const cursor = svgEl("line", { y1: pad.top, y2: height - pad.bottom, class: "cursor", visibility: "hidden" });
+  const groundDot = svgEl("circle", { r: 4, fill: CHART_GROUND, stroke: CHART_SURFACE, "stroke-width": 2, visibility: "hidden" });
+  const droneDot = svgEl("circle", { r: 4, fill: CHART_DRONE, stroke: CHART_SURFACE, "stroke-width": 2, visibility: "hidden" });
+  svg.append(cursor, groundDot, droneDot);
+  const tip = document.createElement("div");
+  tip.className = "terrain-tip";
+  tip.hidden = true;
+  let shown = -1;
+  const show = (index) => {
+    shown = Math.max(0, Math.min(profile.length - 1, index));
+    const s = profile[shown];
+    const px = x(s.distance);
+    cursor.setAttribute("x1", px);
+    cursor.setAttribute("x2", px);
+    groundDot.setAttribute("cx", px);
+    groundDot.setAttribute("cy", y(s.ground));
+    droneDot.setAttribute("cx", px);
+    droneDot.setAttribute("cy", y(s.altitude));
+    for (const el of [cursor, groundDot, droneDot]) el.setAttribute("visibility", "visible");
+    tip.replaceChildren();
+    for (const [value, label, color] of [
+      [s.altitude, "dron", CHART_DRONE],
+      [s.ground, "suelo", CHART_GROUND],
+    ]) {
+      const row = document.createElement("div");
+      row.innerHTML = `<i style="background:${color}"></i><strong></strong> <span></span>`;
+      row.querySelector("strong").textContent = `${num(value)} m`;
+      row.querySelector("span").textContent = label;
+      tip.append(row);
+    }
+    const foot = document.createElement("div");
+    foot.className = "foot";
+    foot.textContent = `a ${distanceText(s.distance)} · ${num(s.altitude - s.ground)} m sobre el suelo`;
+    tip.append(foot);
+    tip.hidden = false;
+    // Del lado contrario al puntero, para no taparlo.
+    const left = px > width / 2;
+    tip.style.left = left ? "" : `${px + 10}px`;
+    tip.style.right = left ? `${width - px + 10}px` : "";
+  };
+  const hide = () => {
+    shown = -1;
+    tip.hidden = true;
+    for (const el of [cursor, groundDot, droneDot]) el.setAttribute("visibility", "hidden");
+  };
+  const nearest = (d) => {
+    let best = 0;
+    for (let i = 1; i < profile.length; i++) if (Math.abs(profile[i].distance - d) < Math.abs(profile[best].distance - d)) best = i;
+    return best;
+  };
+  svg.addEventListener("pointermove", (event) => {
+    const bounds = svg.getBoundingClientRect();
+    const px = ((event.clientX - bounds.left) / bounds.width) * width;
+    show(nearest(((px - pad.left) / (width - pad.left - pad.right)) * total));
+  });
+  svg.addEventListener("pointerleave", hide);
+  svg.addEventListener("blur", hide);
+  svg.addEventListener("keydown", (event) => {
+    const step = Math.max(1, Math.round(profile.length / 40));
+    if (event.key === "ArrowRight") show(shown < 0 ? 0 : shown + step);
+    else if (event.key === "ArrowLeft") show(shown < 0 ? profile.length - 1 : shown - step);
+    else return;
+    event.preventDefault();
+  });
+
+  // Lo mismo en una tabla, unas 10 filas a lo largo de la ruta.
+  const details = document.createElement("details");
+  details.className = "terrain-table";
+  details.innerHTML = `<summary>Ver como tabla</summary><table><thead><tr><th>Distancia</th><th>Suelo</th><th>Dron</th><th>Sobre el suelo</th></tr></thead><tbody></tbody></table>`;
+  const body = details.querySelector("tbody");
+  const rows = new Set(Array.from({ length: 11 }, (_, i) => nearest((total * i) / 10)));
+  for (const i of rows) {
+    const s = profile[i];
+    const tr = document.createElement("tr");
+    for (const text of [distanceText(s.distance), `${num(s.ground)} m`, `${num(s.altitude)} m`, `${num(s.altitude - s.ground)} m`]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+  const open = box.querySelector("details")?.open ?? false;
+  details.open = open;
+
+  const plot = document.createElement("div");
+  plot.className = "terrain-plot";
+  plot.append(svg, tip);
+  box.replaceChildren(head, plot, details);
 }
 
 function buildUnknownParams(params, c) {
