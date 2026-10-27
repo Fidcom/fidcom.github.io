@@ -874,6 +874,7 @@ button {
   font-size: 12px;
   color: var(--text-3);
   margin-top: 4px;
+  white-space: pre-line;
 }
 
 .param .help.warn {
@@ -1674,4 +1675,152 @@ button {
   border-right: 5px solid transparent;
   border-bottom: 9px solid #ffffff;
   filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.8));
+}
+
+/* ---------- Perfil del terreno ---------- */
+
+.terrain-chart {
+  margin-top: 12px;
+  border-radius: 12px;
+  background: var(--card);
+  padding: 10px 10px 6px;
+}
+
+.terrain-chart-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+
+.terrain-chart-head .key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.terrain-chart-head i,
+.terrain-tip i {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.terrain-chart-head .unit {
+  margin-left: auto;
+  color: var(--text-3);
+}
+
+.terrain-plot {
+  position: relative;
+}
+
+.terrain-plot svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  outline: none;
+  touch-action: pan-y;
+}
+
+.terrain-plot svg:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  border-radius: 6px;
+}
+
+.terrain-plot .grid {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+
+.terrain-plot .grid.zero {
+  stroke: rgba(255, 255, 255, 0.22);
+}
+
+.terrain-plot .tick {
+  font-size: 10px;
+  fill: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.terrain-plot .series {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.terrain-plot .cursor {
+  stroke: rgba(255, 255, 255, 0.35);
+  stroke-width: 1;
+}
+
+.terrain-tip {
+  position: absolute;
+  top: 4px;
+  pointer-events: none;
+  background: var(--panel-solid);
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.terrain-tip div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.terrain-tip strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.terrain-tip .foot {
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+.terrain-table {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.terrain-table summary {
+  cursor: pointer;
+  color: var(--text-3);
+  padding: 2px 0;
+}
+
+.terrain-table table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.terrain-table th,
+.terrain-table td {
+  text-align: right;
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--stroke);
+}
+
+.terrain-table th {
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.terrain-table th:first-child,
+.terrain-table td:first-child {
+  text-align: left;
 }

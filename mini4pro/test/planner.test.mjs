@@ -32,6 +32,10 @@ import {
   startAltitude,
   takeoffOf,
   waypointHeading,
+  TerrainFollow,
+  TerrainMissingError,
+  TerrariumTiles,
+  tileTerrain,
 } from "../planner.js";
 
 const near = (actual, expected, tolerance, message) =>
@@ -509,4 +513,82 @@ test("corredor: duplicar, despegue automático y encuadre", () => {
   assert.equal(componentPoints(corridor).length, 6);
   assert.deepEqual(componentPoints(newCorridorComponent([origin])), [origin]);
   assert.equal(componentName(corridor), "Corredor");
+});
+
+// ---- Seguir el terreno: los mismos números que Terrain.kt ----
+
+const geo = (x, y) => pr.toGeo({ x, y });
+/** La loma de TerrainTest.kt: el suelo a 100 m sobre el mar y 40 m más en (0, 120). */
+const hill = {
+  elevation(p) {
+    const d = pr.toLocal(p);
+    const dy = d.y - 120;
+    return 100 + 40 * Math.exp(-(d.x * d.x + dy * dy) / (2 * 70 * 70));
+  },
+};
+
+test("terreno: píxeles y mosaicos de Terrarium como en la app", () => {
+  assert.equal(TerrariumTiles.height(128, 0, 0), 0);
+  assert.equal(TerrariumTiles.height(128, 100, 128), 100.5);
+  // El fondo del mar cuenta como 0.
+  assert.equal(TerrariumTiles.height(127, 0, 0), 0);
+  const [px, py] = TerrariumTiles.worldPixel(origin);
+  near(px, 1330293.418667, 1e-5);
+  near(py, 1881693.281194, 1e-5);
+  const tiles = TerrariumTiles.tilesFor([geo(-1000, -1000), geo(1500, 1200)], 500);
+  assert.deepEqual(tiles, [5195, 5196, 5197].flatMap((x) => [7349, 7350, 7351].map((y) => [x, y])));
+  assert.ok(TerrariumTiles.url(5, 7).endsWith("/terrarium/14/5/7.png"));
+
+  const size = TerrariumTiles.SIZE;
+  const mod = (a, n) => ((a % n) + n) % n;
+  const terrain = tileTerrain((tx, ty) =>
+    Float32Array.from({ length: size * size }, (_, i) => mod(tx * size + (i % size), 97) + mod(ty * size + Math.floor(i / size), 89) * 0.5),
+  );
+  near(terrain.elevation(origin), 62.309263775, 1e-6);
+  near(terrain.elevation(geo(300, -200)), 106.373170246, 1e-6);
+  near(terrain.elevation(geo(-1234, 777)), 122.073956902, 1e-6);
+  assert.equal(tileTerrain(() => null).elevation(origin), null);
+});
+
+test("terreno: el perfil de una ruta sobre la loma, igual que en la app", () => {
+  const ref = TerrainFollow.reference(hill, hill.elevation(origin));
+  const path = [geo(0, 0), geo(0, 120), geo(60, 120), geo(60, 300)];
+  const profile = TerrainFollow.alongRoute(ref, path, [30, 30, 50, 20]);
+  assert.equal(profile.length, 73);
+  const expected = {
+    0: [0, 0, 30],
+    7: [34.960675822, 9.93455706, 39.93455706],
+    24: [119.865174248, 30.79734804, 60.79734804],
+    30: [149.831282658, 27.287511113, 67.287511113],
+    72: [359.595152441, -8.187122546, 11.812877454],
+  };
+  for (const [i, [distance, ground, altitude]] of Object.entries(expected)) {
+    near(profile[i].distance, distance, 1e-6, `distancia ${i}`);
+    near(profile[i].ground, ground, 1e-6, `suelo ${i}`);
+    near(profile[i].altitude, altitude, 1e-6, `altura ${i}`);
+  }
+  near(TerrainFollow.highestGround(ref, geo(-200, 0), geo(150, 260)), 28.704633271, 1e-6);
+  // Sin datos en parte del camino, no se puede.
+  const holey = TerrainFollow.reference({ elevation: (p) => (pr.toLocal(p).x > 50 ? null : 100) }, 100);
+  assert.throws(() => TerrainFollow.alongRoute(holey, path, [30, 30, 30, 30]), TerrainMissingError);
+});
+
+test("terreno: qué componentes lo siguen y cómo se guarda", () => {
+  const components = [
+    map({ terrainFollow: true }),
+    { ...newCorridorComponent([origin, geo(0, 200)]), terrainFollow: true },
+    { ...newWaypointsComponent([newWaypoint(origin, 30)]), terrainFollow: true },
+    { ...newPhotoComponent(origin), terrainFollow: true },
+    { ...newPanoComponent(origin), terrainFollow: true },
+  ];
+  const plan = newPlan("Loma", components);
+  assert.ok(components.every(TerrainFollow.follows));
+  assert.ok(TerrainFollow.needed(plan));
+  assert.deepEqual(normalizePlan(JSON.parse(serializePlan(plan))), plan);
+  // La órbita no lo sigue; apagado o sin el campo, tampoco.
+  assert.ok(!TerrainFollow.follows({ ...newOrbitComponent(origin), terrainFollow: true }));
+  const bare = normalizePlan({ id: "x", components: [{ id: "c", type: "photo", position: origin, terrainFollow: "sí" }] });
+  assert.equal(bare.components[0].terrainFollow, false);
+  assert.ok(!TerrainFollow.needed(bare));
+  assert.ok(!TerrainFollow.needed(newPlan("x", [{ ...components[0], enabled: false }])));
 });

@@ -773,6 +773,8 @@ export function newMapComponent(boundary = []) {
     name: null,
     enabled: true,
     altitude: 30,
+    // La altura es sobre el suelo de cada punto (siguiendo el terreno), no sobre el despegue.
+    terrainFollow: false,
     boundary,
     frontOverlap: 75,
     sideOverlap: 70,
@@ -839,6 +841,8 @@ export function newWaypointsComponent(points = []) {
     enabled: true,
     // Altura de los puntos nuevos.
     altitude: 30,
+    // Las alturas de los puntos son sobre el suelo de cada uno, no sobre el despegue.
+    terrainFollow: false,
     points,
     speed: 5,
     // Ángulo de la cámara en los puntos que no tienen uno propio.
@@ -863,6 +867,7 @@ export function newPhotoComponent(position = null) {
     name: null,
     enabled: true,
     altitude: 30,
+    terrainFollow: false,
     position,
     heading: 0,
     gimbalPitch: -30,
@@ -884,6 +889,7 @@ export function newCorridorComponent(path = []) {
     name: null,
     enabled: true,
     altitude: 30,
+    terrainFollow: false,
     // La línea del centro, en el orden en que se dibujó.
     path,
     // Ancho que se quiere cubrir (m), la mitad a cada lado de la línea.
@@ -909,6 +915,7 @@ export function newPanoComponent(position = null) {
     name: null,
     enabled: true,
     altitude: 40,
+    terrainFollow: false,
     position,
     panoType: "sphere",
     heading: 0,
@@ -960,6 +967,7 @@ export function normalizeComponent(json) {
   if (typeof component.id !== "string" || !component.id) component.id = base.id;
   if (typeof component.name !== "string" || !component.name.trim()) component.name = null;
   component.enabled = component.enabled !== false;
+  if ("terrainFollow" in base) component.terrainFollow = component.terrainFollow === true;
   if (type === "waypoints") {
     component.altitude = finite(component.altitude, base.altitude);
     component.points = (Array.isArray(json.points) ? json.points : []).map((p) => normalizeWaypoint(p, component.altitude)).filter(Boolean);
@@ -1257,6 +1265,155 @@ export function planPoints(plan) {
 
 export const hasGeometry = (plan) => plan.components.some((c) => anchorOf(c));
 
+// ---- Seguir el terreno ----
+
+/**
+ * Mosaicos de elevación "Terrarium" (AWS Terrain Tiles, libres y sin clave): cada píxel guarda la
+ * altura como R·256 + G + B/256 − 32768 metros. A zoom 14 cada píxel mide unos 9 m, como los datos
+ * del USGS en Puerto Rico (10 m). Lo mismo que TerrariumTiles en Kotlin.
+ */
+export const TerrariumTiles = {
+  ZOOM: 14,
+  SIZE: 256,
+
+  url: (x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/14/${x}/${y}.png`,
+
+  /** La altura de un píxel. El mar cuenta como 0: los datos traen la profundidad del fondo. */
+  height: (r, g, b) => Math.max(0, r * 256 + g + b / 256 - 32768),
+
+  /** Posición del punto en píxeles del mundo a zoom 14 (x hacia el este, y hacia el sur). */
+  worldPixel([lat, lon]) {
+    const n = TerrariumTiles.SIZE * 2 ** TerrariumTiles.ZOOM;
+    const phi = rad(Math.min(85, Math.max(-85, lat)));
+    return [((lon + 180) / 360) * n, ((1 - Math.log(Math.tan(phi) + 1 / Math.cos(phi)) / Math.PI) / 2) * n];
+  },
+
+  /** Los mosaicos [x, y] que cubren los puntos con `marginMeters` alrededor. */
+  tilesFor(points, marginMeters) {
+    if (!points.length) return [];
+    const lats = points.map((p) => p[0]);
+    const lons = points.map((p) => p[1]);
+    const south = Math.min(...lats) - marginMeters / METERS_PER_DEG;
+    const north = Math.max(...lats) + marginMeters / METERS_PER_DEG;
+    const lonMargin = marginMeters / (METERS_PER_DEG * Math.cos(rad(points[0][0])));
+    const [x0, y0] = TerrariumTiles.worldPixel([north, Math.min(...lons) - lonMargin]);
+    const [x1, y1] = TerrariumTiles.worldPixel([south, Math.max(...lons) + lonMargin]);
+    const size = TerrariumTiles.SIZE;
+    const tiles = [];
+    for (let x = Math.floor(x0 / size); x <= Math.floor(x1 / size); x++) {
+      for (let y = Math.floor(y0 / size); y <= Math.floor(y1 / size); y++) tiles.push([x, y]);
+    }
+    return tiles;
+  },
+};
+
+/**
+ * El terreno de los mosaicos que haya: `tile(x, y)` da las alturas del mosaico (256 × 256, fila
+ * por fila) o null. Interpola entre los cuatro píxeles más cercanos; null si falta alguno.
+ */
+export function tileTerrain(tile) {
+  const size = TerrariumTiles.SIZE;
+  const mod = (a, n) => ((a % n) + n) % n;
+  const h = (x, y) => {
+    const heights = tile(Math.floor(x / size), Math.floor(y / size));
+    return heights ? heights[mod(y, size) * size + mod(x, size)] : null;
+  };
+  return {
+    elevation(point) {
+      const [px, py] = TerrariumTiles.worldPixel(point);
+      // El valor de cada píxel es el de su centro.
+      const fx = px - 0.5;
+      const fy = py - 0.5;
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const tx = fx - x0;
+      const ty = fy - y0;
+      const a = h(x0, y0);
+      const b = h(x0 + 1, y0);
+      const c = h(x0, y0 + 1);
+      const d = h(x0 + 1, y0 + 1);
+      if (a === null || b === null || c === null || d === null) return null;
+      return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+    },
+  };
+}
+
+/** Faltan los datos del terreno donde hacen falta para seguirlo. */
+export class TerrainMissingError extends Error {}
+
+/** Seguir el terreno: la altura de un componente se mide sobre el suelo de cada punto, como en Dronelink. */
+export const TerrainFollow = {
+  /** Cada cuántos metros se mira el suelo. */
+  STEP: 5,
+  /** En los tránsitos de una misión que sigue el terreno, lo mínimo sobre el suelo más alto del camino. */
+  TRANSIT_CLEARANCE: 30,
+  MISSING: "Faltan los datos del terreno de esta zona",
+  TYPES: ["map", "corridor", "waypoints", "photo", "pano"],
+
+  follows: (component) => TerrainFollow.TYPES.includes(component.type) && component.terrainFollow === true,
+
+  /** Si algún componente que se vuela sigue el terreno. */
+  needed: (plan) => plan.components.some((c) => c.enabled && TerrainFollow.follows(c)),
+
+  /**
+   * El suelo con el despegue como altura 0: `ground(p)` es la altura del suelo sobre el despegue y
+   * `altitude(p, agl)` la del dron para ir `agl` m sobre el suelo. Lanzan TerrainMissingError sin datos.
+   */
+  reference(terrain, takeoffGround) {
+    const ground = (point) => {
+      const elevation = terrain.elevation(point);
+      if (elevation === null || elevation === undefined) throw new TerrainMissingError(TerrainFollow.MISSING);
+      return elevation - takeoffGround;
+    };
+    return { terrain, takeoffGround, ground, altitude: (point, agl) => agl + ground(point) };
+  },
+
+  /**
+   * El suelo y la altura del dron a lo largo de `path` cada STEP m: [{distance, ground, altitude}],
+   * todo sobre el despegue. `agl`: la altura sobre el suelo en cada punto de `path`.
+   */
+  alongRoute(ref, path, agl) {
+    if (!path.length) return [];
+    const first = ref.ground(path[0]);
+    const points = [{ distance: 0, ground: first, altitude: agl[0] + first }];
+    let walked = 0;
+    for (let i = 1; i < path.length; i++) {
+      const length = Geo.distance(path[i - 1], path[i]);
+      const n = Math.max(1, Math.ceil(length / TerrainFollow.STEP - 1e-9));
+      const proj = projection(path[i - 1]);
+      const to = proj.toLocal(path[i]);
+      for (let k = 1; k <= n; k++) {
+        const f = k / n;
+        const ground = ref.ground(proj.toGeo({ x: to.x * f, y: to.y * f }));
+        points.push({ distance: walked + length * f, ground, altitude: agl[i - 1] + (agl[i] - agl[i - 1]) * f + ground });
+      }
+      walked += length;
+    }
+    return points;
+  },
+
+  /** La altura sobre el suelo en cada punto de la ruta `path` del componente. */
+  aglAlong: (component, path) =>
+    component.type === "waypoints" && component.points.length === path.length
+      ? component.points.map((p) => p.altitude)
+      : path.map(() => component.altitude),
+
+  /** El suelo más alto (sobre el despegue) en línea recta de `from` a `to`. */
+  highestGround(ref, from, to) {
+    const proj = projection(from);
+    const end = proj.toLocal(to);
+    const n = Math.max(1, Math.ceil(Math.hypot(end.x, end.y) / TerrainFollow.STEP - 1e-9));
+    let highest = -Infinity;
+    for (let i = 0; i <= n; i++) highest = Math.max(highest, ref.ground(proj.toGeo({ x: (end.x * i) / n, y: (end.y * i) / n })));
+    return highest;
+  },
+
+  /** Los puntos alrededor de los que hacen falta datos del suelo: la ruta de cada componente y el despegue. */
+  points(plan) {
+    return planPoints(plan);
+  },
+};
+
 // ---- Textos ----
 
 export function formatDuration(seconds) {
@@ -1274,6 +1431,14 @@ export function compass(heading) {
 
 /** Resumen de un componente, como "10 m | 0.1 ha | Grid | 75% | 70%" en Dronelink. */
 export function componentSummary(component) {
+  const text = componentDetails(component);
+  if (!TerrainFollow.follows(component)) return text;
+  // Siempre empieza por la altura: siguiendo el terreno, es sobre el suelo.
+  const altitude = text.split(" · ")[0];
+  return `${altitude} sobre el suelo${text.slice(altitude.length)}`;
+}
+
+function componentDetails(component) {
   if (!isKnown(component)) return "No se vuela con esta versión";
   if (component.type === "waypoints") {
     if (!component.points.length) return `${num(component.altitude)} m · sin puntos`;
