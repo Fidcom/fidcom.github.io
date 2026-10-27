@@ -16,6 +16,13 @@ export const MINI_4_PRO = {
   imageHeightPx: 6048,
 };
 
+/** El mismo sensor en modo de 12 MP: píxeles más grandes, menos detalle, guarda más rápido. */
+export const MINI_4_PRO_12MP = { ...MINI_4_PRO, name: "Mini 4 Pro (12 MP)", imageWidthPx: 4032, imageHeightPx: 3024 };
+
+export const cameraFor = (mission) => (mission.photoSize === "12mp" ? MINI_4_PRO_12MP : MINI_4_PRO);
+
+// Opciones de cada parámetro: [valor en el JSON, texto]. Son las mismas que los enum de Mission.kt.
+
 /** Patrón del mapa: líneas en una dirección, o cruzadas (dos pasadas a 90°) como "Grid" en Dronelink. */
 export const MAP_PATTERNS = [
   ["normal", "Normal"],
@@ -23,9 +30,140 @@ export const MAP_PATTERNS = [
 ];
 
 export const FINISH_ACTIONS = [
-  ["HOVER", "Quedarse en el aire"],
-  ["GO_HOME", "Regresar a casa"],
+  ["HOVER", "Quedarse"],
+  ["GO_HOME", "Volver a casa"],
+  ["LAND", "Aterrizar"],
 ];
+
+export const CAPTURE_MODES = [
+  ["photo", "Fotos"],
+  ["video", "Video"],
+  ["none", "Nada"],
+];
+
+export const PHOTO_SIZES = [
+  ["48mp", "48 MP"],
+  ["12mp", "12 MP"],
+];
+
+/** Distancia: la foto se toma al llegar a cada punto. Tiempo: cada N segundos a velocidad fija. */
+export const CAPTURE_PRIORITIES = [
+  ["distance", "Distancia"],
+  ["time", "Tiempo"],
+];
+
+/** Fotos por punto: una, o varias con distinta exposición (AEB) para HDR. */
+export const PHOTO_TYPES = [
+  ["single", "Simple"],
+  ["aeb3", "AEB 3"],
+  ["aeb5", "AEB 5"],
+];
+
+export const SPACING_MODES = [
+  ["overlap", "Traslape"],
+  ["distance", "Distancia"],
+];
+
+export const MAP_HEADINGS = [
+  ["forward", "Adelante"],
+  ["left", "Izquierda"],
+  ["right", "Derecha"],
+  ["custom", "Otro"],
+];
+
+export const HEADING_REFERENCES = [
+  ["path", "Respecto a la ruta"],
+  ["north", "Respecto al norte"],
+];
+
+export const ORBIT_HEADINGS = [
+  ["center", "Mirando al centro"],
+  ["forward", "Hacia adelante"],
+  ["backward", "Hacia atrás"],
+  ["outward", "Hacia afuera"],
+  ["custom", "Rumbo fijo"],
+];
+
+// Ajustes de cámara de la misión. null = "Sin cambiar": se usa lo que tenga la cámara.
+
+export const PHOTO_FORMATS = [
+  ["jpeg", "JPEG"],
+  ["raw", "RAW"],
+  ["jpeg_raw", "JPEG + RAW"],
+];
+
+export const PHOTO_RATIOS = [
+  ["4:3", "4:3"],
+  ["16:9", "16:9"],
+];
+
+export const EXPOSURE_MODES = [
+  ["auto", "Automática"],
+  ["manual", "Manual"],
+];
+
+/** Compensación de exposición, de -3 a +3 en tercios. */
+export const EV_VALUES = Array.from({ length: 19 }, (_, i) => Math.round(((i - 9) / 3) * 10) / 10).map((v) => [
+  v,
+  `${v > 0 ? "+" : ""}${v.toLocaleString("es", { minimumFractionDigits: 1 })}`,
+]);
+
+export const ISO_VALUES = [100, 200, 400, 800, 1600, 3200, 6400].map((v) => [v, String(v)]);
+
+export const SHUTTER_VALUES = [
+  "1/8000", "1/6400", "1/5000", "1/4000", "1/3200", "1/2500", "1/2000", "1/1600", "1/1250", "1/1000",
+  "1/800", "1/640", "1/500", "1/400", "1/320", "1/240", "1/200", "1/160", "1/120", "1/100", "1/80",
+  "1/60", "1/50", "1/40", "1/30", "1/25", "1/20", "1/15", "1/10", "1/8", "1/5", "1/4", "1/3", "1/2",
+  "1", "2",
+].map((v) => [v, v.includes("/") ? `${v} s` : `${v} s`]);
+
+export const WHITE_BALANCES = [
+  ["auto", "Automático"],
+  ["sunny", "Soleado"],
+  ["cloudy", "Nublado"],
+  ["incandescent", "Incandescente"],
+  ["fluorescent", "Fluorescente"],
+  ["custom", "Temperatura fija"],
+];
+
+export const FOCUS_MODES = [
+  ["afc", "AF continuo"],
+  ["af", "AF una vez"],
+  ["infinity", "Infinito"],
+];
+
+export const VIDEO_RESOLUTIONS = [
+  ["4k", "4K"],
+  ["2.7k", "2.7K"],
+  ["1080p", "1080p"],
+];
+
+export const FRAME_RATES = [24, 25, 30, 48, 50, 60, 100].map((v) => [v, `${v} fps`]);
+
+export const COLOR_PROFILES = [
+  ["normal", "Normal"],
+  ["hlg", "HLG"],
+  ["dlogm", "D-Log M"],
+];
+
+/** Ajustes de cámara que una misión puede fijar al empezar. */
+export const CAMERA_SETTING_KEYS = [
+  "photoFormat",
+  "photoRatio",
+  "exposureMode",
+  "ev",
+  "iso",
+  "shutter",
+  "whiteBalance",
+  "whiteBalanceKelvin",
+  "focusMode",
+  "videoResolution",
+  "frameRate",
+  "colorProfile",
+];
+
+/** Aceleración típica del Mini 4 Pro para frenar y arrancar en cada foto (m/s²). */
+const ACCELERATION = 2;
 
 /** Proyección plana alrededor de un origen: x hacia el este, y hacia el norte. */
 export function projection(origin) {
@@ -108,31 +246,80 @@ export const MapPlanner = {
     (camera.sensorHeightMm * altitude) / camera.focalLengthMm,
   ],
 
+  /**
+   * Ángulo entre el frente del dron (y de la cámara) y la línea de vuelo con rumbo `direction`:
+   * 0 = mira hacia adelante, ±90 = de lado.
+   */
+  headingOffset(mission, direction) {
+    switch (mission.heading) {
+      case "left":
+        return -90;
+      case "right":
+        return 90;
+      case "custom":
+        return mission.headingReference === "path" ? mission.headingAngle : mission.headingAngle - direction;
+      default:
+        return 0;
+    }
+  },
+
+  /** Separación entre líneas y entre fotos para líneas con rumbo `direction`. */
+  spacing(mission, direction) {
+    if (mission.spacing === "distance") return { line: mission.sideDistance, photo: mission.frontDistance };
+    let [footWidth, footHeight] = MapPlanner.footprint(cameraFor(mission), mission.altitude);
+    // Con el dron de lado, el lado largo de la foto queda a lo largo de la línea.
+    const offset = Math.abs(Geo.normalize(MapPlanner.headingOffset(mission, direction)) % 180);
+    if (offset > 45 && offset < 135) [footWidth, footHeight] = [footHeight, footWidth];
+    return {
+      line: Math.max(1, footWidth * (1 - mission.sideOverlap / 100)),
+      photo: Math.max(0.5, footHeight * (1 - mission.frontOverlap / 100)),
+    };
+  },
+
   plan(mission) {
-    const camera = MINI_4_PRO;
-    const [footWidth, footHeight] = MapPlanner.footprint(camera, mission.altitude);
-    const lineSpacing = Math.max(1, footWidth * (1 - mission.sideOverlap / 100));
-    const photoSpacing = Math.max(0.5, footHeight * (1 - mission.frontOverlap / 100));
+    const camera = cameraFor(mission);
+    const photos = mission.captureMode === "photo";
+    const directions = mission.pattern === "grid" ? [mission.direction, mission.direction + 90] : [mission.direction];
+    const spacings = directions.map((d) => MapPlanner.spacing(mission, d));
+    const photoSpacing = Math.min(...spacings.map((sp) => sp.photo));
     // La cámara no puede tomar fotos más rápido que minPhotoInterval.
-    const speed = Math.max(0.5, Math.min(mission.maxSpeed, photoSpacing / mission.minPhotoInterval));
-    const first = mission.boundary.length >= 3 ? MapPlanner.gridLegs(mission.boundary, mission.direction, lineSpacing) : [];
-    const legs =
-      mission.pattern === "grid" && first.length > 0
-        ? [...first, ...continueFrom(first.at(-1).end, MapPlanner.gridLegs(mission.boundary, mission.direction + 90, lineSpacing))]
-        : first;
+    const speed = photos ? Math.max(0.5, Math.min(mission.maxSpeed, photoSpacing / mission.minPhotoInterval)) : mission.maxSpeed;
+
+    let legs = [];
+    let positions = 0;
+    if (mission.boundary.length >= 3) {
+      directions.forEach((direction, pass) => {
+        let passLegs = MapPlanner.gridLegs(mission.boundary, direction, spacings[pass].line);
+        // La primera pasada empieza donde se puso el inicio; la segunda, cerca de donde acabó la primera.
+        const from = pass === 0 ? mission.start : legs.at(-1)?.end;
+        if (from) passLegs = startNearest(from, passLegs);
+        positions += passLegs.reduce((sum, leg) => sum + Math.floor(Geo.distance(leg.start, leg.end) / spacings[pass].photo) + 1, 0);
+        legs = legs.concat(passLegs);
+      });
+    }
+    // Con prioridad por tiempo, el dron arranca antes del área para llegar a velocidad.
+    if (photos && mission.capturePriority === "time") {
+      const runUp = Math.max(3, speed * 2);
+      legs = legs.map((leg) => extendLeg(leg, runUp));
+    }
     const path = legs.flatMap((leg) => [leg.start, leg.end]);
     const length = Geo.pathLength(path);
-    const photoCount = legs.reduce((s, leg) => s + Math.floor(Geo.distance(leg.start, leg.end) / photoSpacing) + 1, 0);
+    const shots = mission.photoType === "aeb5" ? 5 : mission.photoType === "aeb3" ? 3 : 1;
+    const stops =
+      photos && mission.capturePriority !== "time" && mission.captureSpeed !== null && mission.captureSpeed < speed
+        ? positions * ((speed - mission.captureSpeed) / ACCELERATION + (mission.captureSpeed === 0 ? 1 : 0))
+        : 0;
     return {
       legs,
       path,
-      lineSpacing,
+      lineSpacing: spacings[0].line,
       photoSpacing,
       speed,
-      photoCount,
+      positions: photos ? positions : 0,
+      photoCount: photos ? positions * (mission.capturePriority === "time" ? 1 : shots) : 0,
       lengthMeters: length,
       // Más unos segundos por giro en cada extremo.
-      durationSeconds: legs.length === 0 ? 0 : length / speed + legs.length * 4,
+      durationSeconds: legs.length === 0 ? 0 : length / speed + legs.length * 4 + stops,
       gsdCmPerPx: MapPlanner.gsd(camera, mission.altitude),
       areaHectares: Geo.area(mission.boundary) / 10000,
     };
@@ -196,16 +383,30 @@ export const MapPlanner = {
 };
 
 /**
- * Ordena la segunda pasada del patrón cruzado para que empiece en la esquina más cercana a donde
- * terminó la primera: puede recorrerse al derecho o al revés, y cada tramo en un sentido u otro.
+ * Ordena los tramos para empezar en la esquina más cercana a `point`: la cuadrícula puede
+ * recorrerse al derecho o al revés, y cada tramo en un sentido u otro.
  */
-function continueFrom(point, legs) {
+function startNearest(point, legs) {
   if (legs.length === 0) return legs;
   const flipped = legs.map((leg) => ({ start: leg.end, end: leg.start }));
   const options = [legs, flipped, [...legs].reverse(), [...flipped].reverse()];
   return options.reduce((best, option) =>
     Geo.distance(point, option[0].start) < Geo.distance(point, best[0].start) ? option : best,
   );
+}
+
+/** Alarga un tramo `meters` metros por cada extremo. */
+function extendLeg(leg, meters) {
+  const pr = projection(leg.start);
+  const a = pr.toLocal(leg.start);
+  const b = pr.toLocal(leg.end);
+  const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const ux = (b.x - a.x) / length;
+  const uy = (b.y - a.y) / length;
+  return {
+    start: pr.toGeo({ x: a.x - ux * meters, y: a.y - uy * meters }),
+    end: pr.toGeo({ x: b.x + ux * meters, y: b.y + uy * meters }),
+  };
 }
 
 export const OrbitPlanner = {
@@ -221,16 +422,22 @@ export const OrbitPlanner = {
     for (let i = 0; i <= steps; i++) {
       const f = i / steps;
       const r = startRadius + (endRadius - startRadius) * f;
-      // Empieza al sur del centro; el ángulo es un rumbo (0 = norte).
-      const b = rad(180 + sign * totalDegrees * f);
+      // Empieza en el rumbo startBearing desde el centro (180 = al sur); el ángulo es un rumbo (0 = norte).
+      const b = rad(mission.startBearing + sign * totalDegrees * f);
       path.push(pr.toGeo({ x: r * Math.sin(b), y: r * Math.cos(b) }));
     }
     const horizontal = Geo.pathLength(path);
     const climb = (mission.finalAltitude ?? mission.altitude) - mission.altitude;
     const length = Math.sqrt(horizontal ** 2 + climb ** 2);
     const duration = length / Math.max(0.5, mission.speed);
-    const photoCount = mission.photoInterval ? Math.floor(duration / mission.photoInterval) + 1 : 0;
+    const photoCount = mission.captureMode === "photo" ? Math.floor(duration / mission.photoInterval) + 1 : 0;
     return { path, start: path[0], lengthMeters: length, durationSeconds: duration, photoCount };
+  },
+
+  /** Inclinación del gimbal: apunta al punto de interés si lo hay; si no, la fija. */
+  gimbalPitch(mission) {
+    if (mission.poiAltitude === null || mission.poiAltitude === undefined) return mission.gimbalPitch;
+    return -deg(Math.atan2(mission.altitude - mission.poiAltitude, Math.max(1, mission.radius)));
   },
 
   /** Grados por segundo para recorrer el círculo a `speed` m/s. */
@@ -260,10 +467,29 @@ export function newMapMission(name = "Mapa", boundary = []) {
     sideOverlap: 70,
     direction: 0,
     pattern: "normal",
+    start: null,
     gimbalPitch: -90,
     maxSpeed: 8,
     minPhotoInterval: 5,
+    captureMode: "photo",
+    photoSize: "48mp",
+    capturePriority: "distance",
+    photoType: "single",
+    captureSpeed: null,
+    spacing: "overlap",
+    frontDistance: 10,
+    sideDistance: 10,
+    heading: "forward",
+    headingAngle: 0,
+    headingReference: "north",
+    verifyFileCreated: false,
+    highWindTolerance: false,
+    ...emptyCameraSettings(),
   };
+}
+
+function emptyCameraSettings() {
+  return Object.fromEntries(CAMERA_SETTING_KEYS.map((key) => [key, null]));
 }
 
 export function newOrbitMission(name = "Órbita") {
@@ -281,9 +507,16 @@ export function newOrbitMission(name = "Órbita") {
     finalRadius: null,
     clockwise: true,
     rotations: 1,
+    startBearing: 180,
     speed: 4,
+    heading: "center",
+    headingAngle: 0,
+    poiAltitude: null,
     gimbalPitch: -20,
-    photoInterval: null,
+    captureMode: "none",
+    photoInterval: 3,
+    photoSize: "48mp",
+    ...emptyCameraSettings(),
   };
 }
 
@@ -292,7 +525,25 @@ export function normalizeMission(json) {
   const base = json.type === "orbit" ? newOrbitMission() : newMapMission();
   const mission = { ...base, ...json, version: 1 };
   if (!FINISH_ACTIONS.some(([key]) => key === mission.finishAction)) mission.finishAction = base.finishAction;
-  if (mission.type === "map" && mission.pattern !== "grid") mission.pattern = "normal";
+  if (mission.type === "orbit" && json.captureMode === undefined) {
+    // Formato anterior: photoInterval null quería decir "sin fotos".
+    mission.captureMode = json.photoInterval ? "photo" : "none";
+    mission.photoInterval = json.photoInterval || base.photoInterval;
+  }
+  // Un valor desconocido (de otra versión) vuelve al valor por defecto.
+  const choices = {
+    pattern: MAP_PATTERNS,
+    captureMode: CAPTURE_MODES,
+    photoSize: PHOTO_SIZES,
+    capturePriority: CAPTURE_PRIORITIES,
+    photoType: PHOTO_TYPES,
+    spacing: SPACING_MODES,
+    heading: mission.type === "map" ? MAP_HEADINGS : ORBIT_HEADINGS,
+    headingReference: HEADING_REFERENCES,
+  };
+  for (const [key, options] of Object.entries(choices)) {
+    if (key in base && !options.some(([value]) => value === mission[key])) mission[key] = base[key];
+  }
   return mission;
 }
 
@@ -324,7 +575,8 @@ export function summary(mission) {
     const plan = MapPlanner.plan(mission);
     if (plan.legs.length === 0) return `Mapa · ${num(mission.altitude)} m · sin área`;
     const pattern = mission.pattern === "grid" ? " cruzadas" : "";
-    return `${num(mission.altitude)} m · ${num(plan.areaHectares, 2)} ha · ${plan.legs.length} líneas${pattern} · ${plan.photoCount} fotos · ${formatDuration(plan.durationSeconds)}`;
+    const capture = mission.captureMode === "photo" ? `${plan.photoCount} fotos` : mission.captureMode === "video" ? "video" : "sin captura";
+    return `${num(mission.altitude)} m · ${num(plan.areaHectares, 2)} ha · ${plan.legs.length} líneas${pattern} · ${capture} · ${formatDuration(plan.durationSeconds)}`;
   }
   const plan = OrbitPlanner.plan(mission);
   const turns = mission.rotations === 1 ? "1 vuelta" : `${num(mission.rotations, 1)} vueltas`;

@@ -142,6 +142,34 @@ button {
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
 }
 
+/* Etiqueta de Inicio en el editor de mapas: se arrastra a otra esquina para empezar por ahí. */
+.start-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px 0 5px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid var(--ok);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: grab;
+}
+
+.start-handle::before {
+  content: "";
+  width: 6px;
+  height: 10px;
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.8) 1px, transparent 1.5px);
+  background-size: 3px 3.4px;
+}
+
+.start-handle:hover {
+  background: rgba(61, 220, 132, 0.3);
+}
+
 .end-dot {
   width: 12px;
   height: 12px;
@@ -644,6 +672,120 @@ button {
   background: rgba(255, 255, 255, 0.18);
   color: var(--text);
   font-weight: 600;
+}
+
+.section-note {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 10px;
+  line-height: 1.4;
+}
+
+.select-box {
+  position: relative;
+  width: 172px;
+  flex: none;
+}
+
+.select-box select {
+  width: 100%;
+  height: 36px;
+  appearance: none;
+  background: var(--field);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 0 30px 0 10px;
+  text-align: right;
+  text-align-last: right;
+  cursor: pointer;
+}
+
+.select-box.unset select {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.select-box select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.select-box select option {
+  background: var(--panel-solid);
+  color: var(--text);
+}
+
+.select-box::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  top: 14px;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--text-3);
+  border-bottom: 2px solid var(--text-3);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.param.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.toggle-text .help:empty {
+  display: none;
+}
+
+.param.toggle input {
+  appearance: none;
+  flex: none;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--field);
+  border: 1px solid var(--stroke);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.param.toggle input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+
+.param.toggle input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.param.toggle input:checked::after {
+  transform: translateX(18px);
+}
+
+.param.toggle input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .param-button {
