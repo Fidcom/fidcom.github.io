@@ -2,6 +2,7 @@
 // Las misiones se guardan en este navegador y, si hay token, en GitHub para que las lea el teléfono.
 import {
   FINISH_ACTIONS,
+  MAP_PATTERNS,
   Geo,
   MapPlanner,
   OrbitPlanner,
@@ -9,6 +10,7 @@ import {
   geometry,
   newMapMission,
   newOrbitMission,
+  normalizeMission,
   num,
   parseKml,
   summary,
@@ -24,6 +26,8 @@ const DEFAULT_VIEW = { center: [18.2, -66.45], zoom: 9 };
 const ACCENT = "#2f9bff";
 /** Más líneas que esto es un área demasiado grande para un vuelo; no se dibuja la ruta. */
 const MAX_LEGS = 400;
+/** Las velocidades se guardan en m/s y se muestran en km/h, como en Dronelink. */
+const KMH = 3.6;
 
 const storage = {
   get(key) {
@@ -49,7 +53,11 @@ const storage = {
 const state = (() => {
   try {
     const saved = JSON.parse(storage.get(STATE_KEY));
-    if (saved?.missions) return { shas: {}, dirty: {}, deleted: {}, ...saved };
+    if (saved?.missions) {
+      // Las misiones guardadas antes de agregar un parámetro nuevo lo reciben con su valor por defecto.
+      for (const id of Object.keys(saved.missions)) saved.missions[id] = normalizeMission(saved.missions[id]);
+      return { shas: {}, dirty: {}, deleted: {}, ...saved };
+    }
   } catch {
     // Estado dañado: se empieza de cero.
   }
@@ -531,8 +539,10 @@ function section(params, title) {
 /**
  * Un parámetro numérico. Se aplica mientras se escribe si está dentro de los límites; si no,
  * se avisa en amarillo y al salir del campo se corrige. Con `optional`, vacío vale null.
+ * Con `scale`, se muestra el valor guardado multiplicado (por ejemplo m/s × 3,6 = km/h);
+ * `min` y `max` van en las unidades que se muestran.
  */
-function numberParam(params, { key, label, unit = "", min, max, step = 1, decimals = 0, slider = false, optional = false, placeholder = "", help }) {
+function numberParam(params, { key, label, unit = "", min, max, step = 1, decimals = 0, scale = 1, slider = false, optional = false, placeholder = "", help }) {
   const el = document.createElement("div");
   el.className = "param";
   el.innerHTML = `
@@ -555,9 +565,11 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
 
   let error = null;
   let snapshot = null;
+  const shown = (value) => (value === null || value === undefined ? null : value * scale);
   const show = (value) => {
-    input.value = value === null || value === undefined ? "" : fmt(value, decimals);
-    if (range) range.value = value ?? min;
+    const display = shown(value);
+    input.value = display === null ? "" : fmt(display, decimals);
+    if (range) range.value = display ?? min;
   };
   const showHelp = () => {
     const text = error ?? help?.() ?? "";
@@ -575,8 +587,8 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
     save();
     redrawShapes();
   };
-  const apply = (value) => {
-    current[key] = value;
+  const apply = (display) => {
+    current[key] = display === null ? null : display / scale;
     redrawShapes();
   };
 
@@ -603,7 +615,7 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
   input.addEventListener("blur", () => {
     if (error) {
       const value = parse(input.value);
-      const fixed = value === null ? current[key] : Math.min(max, Math.max(min, value));
+      const fixed = value === null ? current[key] : Math.min(max, Math.max(min, value)) / scale;
       error = null;
       show(fixed);
       current[key] = fixed;
@@ -677,7 +689,7 @@ function buildMapParams(params) {
   section(params, "VUELO");
   numberParam(params, {
     key: "altitude",
-    label: "Altura",
+    label: "Altura sobre el despegue",
     unit: "m",
     min: 5,
     max: 120,
@@ -690,15 +702,16 @@ function buildMapParams(params) {
   numberParam(params, {
     key: "maxSpeed",
     label: "Velocidad máxima",
-    unit: "m/s",
-    min: 1,
-    max: 15,
-    step: 0.1,
+    unit: "km/h",
+    scale: KMH,
+    min: 3,
+    max: 54,
+    step: 0.5,
     decimals: 1,
     help: () => {
       const speed = plan().speed;
       const limited = speed < current.maxSpeed - 0.05;
-      return `Volará a ${num(speed, 1)} m/s (${num(speed * 3.6)} km/h)${limited ? " por el tiempo entre fotos" : ""}`;
+      return `Volará a ${num(speed * KMH, 1)} km/h${limited ? ", limitada por el tiempo entre fotos" : ""}`;
     },
   });
   choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
@@ -743,6 +756,7 @@ function buildMapParams(params) {
   });
 
   section(params, "CUADRÍCULA");
+  choiceParam(params, { key: "pattern", label: "Patrón", options: MAP_PATTERNS });
   const direction = numberParam(params, {
     key: "direction",
     label: "Dirección de las líneas",
@@ -770,7 +784,7 @@ function buildMapParams(params) {
 function buildOrbitParams(params) {
   section(params, "ÓRBITA");
   numberParam(params, { key: "radius", label: "Radio", unit: "m", min: 5, max: 500, slider: true });
-  numberParam(params, { key: "altitude", label: "Altura", unit: "m", min: 5, max: 120, slider: true });
+  numberParam(params, { key: "altitude", label: "Altura sobre el despegue", unit: "m", min: 5, max: 120, slider: true });
   choiceParam(params, {
     key: "clockwise",
     label: "Sentido",
@@ -783,12 +797,13 @@ function buildOrbitParams(params) {
   numberParam(params, {
     key: "speed",
     label: "Velocidad",
-    unit: "m/s",
-    min: 1,
-    max: 12,
-    step: 0.1,
+    unit: "km/h",
+    scale: KMH,
+    min: 3,
+    max: 43,
+    step: 0.5,
     decimals: 1,
-    help: () => `${num(current.speed * 3.6)} km/h · ${num(OrbitPlanner.angularSpeed(current.radius, current.speed), 1)}° por segundo`,
+    help: () => `${num(OrbitPlanner.angularSpeed(current.radius, current.speed), 1)}° por segundo alrededor del centro`,
   });
   choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
 
