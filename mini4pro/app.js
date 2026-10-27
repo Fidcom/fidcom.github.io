@@ -1884,7 +1884,77 @@ $("sync-chip").addEventListener("click", () => {
   $("token-remove").hidden = !token;
   $("sync-error").hidden = !lastError;
   $("sync-error").textContent = lastError;
+  updateQrButton();
   dialog.showModal();
+});
+
+// ---------- QR del token, para pasarlo al teléfono sin escribirlo ----------
+
+let qrLibrary = null;
+
+/** Carga el generador de QR solo cuando hace falta. */
+function loadQrLibrary() {
+  qrLibrary ??= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "vendor/qrcode.js?v=1.4.4";
+    script.onload = () => resolve(window.qrcode);
+    script.onerror = () => {
+      qrLibrary = null;
+      script.remove();
+      reject(new Error("No se pudo cargar el generador de QR. Revisa la conexión."));
+    };
+    document.head.append(script);
+  });
+  return qrLibrary;
+}
+
+/** El texto como QR en SVG, con fondo blanco y margen para que la cámara lo lea bien. */
+function qrSvg(qrcode, text) {
+  const qr = qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  const count = qr.getModuleCount();
+  const margin = 4;
+  const size = count + margin * 2;
+  let path = "";
+  for (let row = 0; row < count; row++) {
+    for (let col = 0; col < count; col++) {
+      if (qr.isDark(row, col)) path += `M${col + margin} ${row + margin}h1v1h-1z`;
+    }
+  }
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" role="img" aria-label="QR del token">` +
+    `<rect width="${size}" height="${size}" fill="#fff"/><path d="${path}" fill="#000"/></svg>`
+  );
+}
+
+function hideQr() {
+  $("token-qr").hidden = true;
+  $("token-qr-code").innerHTML = "";
+  $("token-qr-button").querySelector("span").textContent = "Mostrar QR para el teléfono";
+}
+
+function updateQrButton() {
+  $("token-qr-button").hidden = !$("token-input").value.trim();
+  hideQr();
+}
+
+$("token-input").addEventListener("input", updateQrButton);
+dialog.addEventListener("close", hideQr);
+$("token-qr-button").addEventListener("click", async () => {
+  if (!$("token-qr").hidden) return hideQr();
+  const text = $("token-input").value.trim();
+  if (!text) return;
+  try {
+    $("token-qr-code").innerHTML = qrSvg(await loadQrLibrary(), text);
+    $("token-qr").hidden = false;
+    $("token-qr").scrollIntoView({ block: "nearest" });
+    $("token-qr-button").querySelector("span").textContent = "Ocultar QR";
+    $("sync-error").hidden = true;
+  } catch (error) {
+    $("sync-error").textContent = error.message;
+    $("sync-error").hidden = false;
+  }
 });
 $("token-save").addEventListener("click", async () => {
   const candidate = $("token-input").value.trim();
