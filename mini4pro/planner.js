@@ -87,6 +87,28 @@ export const ORBIT_HEADINGS = [
   ["custom", "Rumbo fijo"],
 ];
 
+/** Qué hace el dron al llegar a un waypoint. */
+export const WAYPOINT_ACTIONS = [
+  ["none", "Nada"],
+  ["photo", "Foto"],
+  ["hover", "Esperar"],
+];
+
+/** Las panorámicas de DJI Fly (PanoType en Panorama.kt). */
+export const PANO_TYPES = [
+  ["sphere", "Esfera"],
+  ["180", "180°"],
+  ["wide", "Angular"],
+  ["vertical", "Vertical"],
+];
+
+export const PANO_DESCRIPTIONS = {
+  sphere: "Todo alrededor y hacia abajo, para verla como una esfera de 360°.",
+  180: "Media vuelta de horizonte, de un lado al otro de lo que ves.",
+  wide: "Más ancha y más alta que una foto, centrada en lo que ves.",
+  vertical: "Del horizonte hacia abajo, en una columna.",
+};
+
 // Ajustes de cámara de la misión. null = "Sin cambiar": se usa lo que tenga la cámara.
 
 export const PHOTO_FORMATS = [
@@ -467,8 +489,124 @@ export const OrbitPlanner = {
   angularSpeed: (radius, speed) => (speed / (2 * Math.PI * radius)) * 360,
 };
 
+// ---- Componentes de puntos: waypoints, foto y panorámica (Panorama.kt y PointsPlanner) ----
+
+/** Segundos para girar, apuntar la cámara, disparar y guardar una foto en un punto. */
+const PHOTO_SECONDS = 4;
+/** Segundos para girar hacia el rumbo de un punto. */
+const TURN_SECONDS = 2;
+/** Segundos por foto de una panorámica (igual que PanoramaMotion). */
+const PANO_SECONDS_PER_PHOTO = 4.5;
+
+const shotsOf = (photoType) => (photoType === "aeb5" ? 5 : photoType === "aeb3" ? 3 : 1);
+
+export const PanoPlan = {
+  LOWEST: -90,
+
+  /**
+   * Las fotos de cada panorámica: {heading, pitch}. `heading` y `pitch` son hacia dónde miran el
+   * dron y la cámara en el centro de la toma. Fila por fila, cada una en sentido contrario.
+   */
+  shots(type, heading, pitch) {
+    const ring = (count) => Array.from({ length: count }, (_, i) => (360 * i) / count);
+    const fan = (count, step) => Array.from({ length: count }, (_, i) => (i - (count - 1) / 2) * step);
+    const rows = (list) =>
+      list.flatMap(([rowPitch, offsets], i) =>
+        (i % 2 === 0 ? offsets : [...offsets].reverse()).map((offset) => ({ heading: Geo.normalize(heading + offset), pitch: rowPitch })),
+      );
+    switch (type) {
+      case "180":
+        return rows([0, -30, -60].map((p) => [p, fan(5, 45)]));
+      case "wide": {
+        const top = Math.min(0, pitch + 25);
+        return rows([top, top - 25, top - 50].map((p) => [Math.max(PanoPlan.LOWEST, p), fan(3, 40)]));
+      }
+      case "vertical": {
+        const top = Math.min(0, pitch + 35);
+        return [top, top - 35, top - 70].map((p) => ({ heading, pitch: Math.max(PanoPlan.LOWEST, p) }));
+      }
+      default:
+        return [
+          ...rows([
+            [0, ring(8)],
+            [-30, ring(8)],
+            [-60, ring(6)],
+          ]),
+          { heading, pitch: PanoPlan.LOWEST },
+        ];
+    }
+  },
+
+  /** Cuánto del horizonte cubre cada una, para dibujarla. */
+  coverage: (type) => ({ sphere: 360, 180: 180, wide: 120, vertical: 70 })[type] ?? 360,
+};
+
+/** Ancho de lo que ve la cámara del Mini 4 Pro en 4:3, en grados. */
+export const LENS_DEGREES = 70;
+
+/**
+ * Hacia dónde mira el dron en el waypoint `i`: su rumbo propio o, si no tiene, hacia donde llega
+ * volando. En el primero, `arrival` (de donde viene el dron) o hacia el segundo.
+ */
+export function waypointHeading(component, i, arrival = null) {
+  const points = component.points;
+  if (points[i].heading !== null && points[i].heading !== undefined) return points[i].heading;
+  const leg = (from) => {
+    const a = points[from];
+    const b = points[from + 1];
+    if (!a || !b || Geo.distance(a.position, b.position) <= 1) return null;
+    return Geo.bearing(a.position, b.position);
+  };
+  return leg(i - 1) ?? (i === 0 ? arrival : null) ?? leg(i) ?? 0;
+}
+
+export const PointsPlanner = {
+  waypoints(c) {
+    if (!c.points.length) return null;
+    let horizontal = 0;
+    let flying = 0;
+    let stops = 0;
+    let photos = 0;
+    c.points.forEach((point, i) => {
+      if (i > 0) {
+        const previous = c.points[i - 1];
+        const meters = Geo.distance(previous.position, point.position);
+        horizontal += meters;
+        flying += meters / Math.max(0.5, c.speed) + Math.abs(point.altitude - previous.altitude) / VERTICAL_SPEED;
+      }
+      if (point.heading !== null && point.heading !== undefined) stops += TURN_SECONDS;
+      if (point.action === "photo") {
+        stops += PHOTO_SECONDS;
+        if (c.captureMode !== "video") photos++;
+      } else if (point.action === "hover") {
+        stops += point.hoverSeconds;
+      }
+    });
+    if (c.captureMode === "photo" && flying > 0) photos += Math.floor(flying / c.photoInterval) + 1;
+    return {
+      path: c.points.map((p) => p.position),
+      altitudes: c.points.map((p) => p.altitude),
+      lengthMeters: horizontal,
+      durationSeconds: flying + stops,
+      photoCount: photos,
+    };
+  },
+
+  photo(c) {
+    if (!c.position) return null;
+    return { path: [c.position], altitudes: [c.altitude], lengthMeters: 0, durationSeconds: PHOTO_SECONDS + TURN_SECONDS, photoCount: shotsOf(c.photoType) };
+  },
+
+  pano(c) {
+    if (!c.position) return null;
+    const shots = PanoPlan.shots(c.panoType, c.heading, c.gimbalPitch).length;
+    return { path: [c.position], altitudes: [c.altitude], lengthMeters: 0, durationSeconds: shots * PANO_SECONDS_PER_PHOTO, photoCount: shots };
+  },
+};
+
 // ---- Planes (formato JSON v2, igual que MissionJson.kt) ----
-// Una misión es un plan con varios componentes en fila (mapas y órbitas), como en Dronelink:
+// Una misión es un plan con varios componentes en fila (mapas, órbitas, waypoints, fotos y
+// panorámicas), como en Dronelink:
 // el dron despega, vuela cada componente empezando cerca de donde terminó el anterior y al final
 // hace lo que diga finishAction.
 
@@ -562,13 +700,120 @@ export function newOrbitComponent(center = null) {
   };
 }
 
+/** Un recorrido por puntos, como "Waypoints" en Dronelink y DJI Fly. */
+export function newWaypointsComponent(points = []) {
+  return {
+    id: componentId(),
+    type: "waypoints",
+    name: null,
+    enabled: true,
+    // Altura de los puntos nuevos.
+    altitude: 30,
+    points,
+    speed: 5,
+    // Ángulo de la cámara en los puntos que no tienen uno propio.
+    gimbalPitch: -30,
+    captureMode: "none",
+    photoInterval: 3,
+    photoSize: "48mp",
+    ...emptyCameraSettings(),
+  };
+}
+
+/** Un punto de un recorrido. heading y gimbalPitch null: hacia donde vuela y el del componente. */
+export function newWaypoint(position, altitude) {
+  return { position, altitude, heading: null, gimbalPitch: null, action: "none", hoverSeconds: 3 };
+}
+
+/** Una foto desde un punto: el dron va ahí, se gira, apunta la cámara y dispara. */
+export function newPhotoComponent(position = null) {
+  return {
+    id: componentId(),
+    type: "photo",
+    name: null,
+    enabled: true,
+    altitude: 30,
+    position,
+    heading: 0,
+    gimbalPitch: -30,
+    captureMode: "photo",
+    photoSize: "48mp",
+    photoType: "single",
+    ...emptyCameraSettings(),
+  };
+}
+
+/** Panorámica desde un punto, como el componente "Panorama" de Dronelink y las de DJI Fly. */
+export function newPanoComponent(position = null) {
+  return {
+    id: componentId(),
+    type: "pano",
+    name: null,
+    enabled: true,
+    altitude: 40,
+    position,
+    panoType: "sphere",
+    heading: 0,
+    gimbalPitch: 0,
+    captureMode: "photo",
+    photoSize: "48mp",
+    ...emptyCameraSettings(),
+  };
+}
+
+const NEW_COMPONENTS = {
+  map: newMapComponent,
+  orbit: newOrbitComponent,
+  waypoints: newWaypointsComponent,
+  photo: newPhotoComponent,
+  pano: newPanoComponent,
+};
+
+/** Si esta versión sabe editar y volar el componente (uno de una versión más nueva se guarda tal cual). */
+export const isKnown = (component) => Object.hasOwn(NEW_COMPONENTS, component.type);
+
+const finite = (value, fallback) => (Number.isFinite(value) ? value : fallback);
+const optionalNumber = (value) => (Number.isFinite(value) ? value : null);
+
+function normalizeWaypoint(json, altitude) {
+  if (!json || !isPoint(json.position)) return null;
+  const point = { ...newWaypoint(json.position, finite(json.altitude, altitude)) };
+  point.heading = optionalNumber(json.heading);
+  point.gimbalPitch = optionalNumber(json.gimbalPitch);
+  if (WAYPOINT_ACTIONS.some(([value]) => value === json.action)) point.action = json.action;
+  if (Number.isFinite(json.hoverSeconds) && json.hoverSeconds >= 0) point.hoverSeconds = json.hoverSeconds;
+  return point;
+}
+
 /** Completa un componente leído de un archivo con los valores por defecto, como en Kotlin. */
 export function normalizeComponent(json) {
-  const base = json.type === "orbit" ? newOrbitComponent() : newMapComponent();
-  const component = { ...base, ...json, type: base.type };
+  const type = json.type === undefined || json.type === "" ? "map" : json.type;
+  if (!Object.hasOwn(NEW_COMPONENTS, type)) {
+    // De una versión más nueva: se guarda tal cual, con el nombre y el encendido que tenga aquí.
+    const unknown = { ...json };
+    if (typeof unknown.id !== "string" || !unknown.id) unknown.id = componentId();
+    if (typeof unknown.name !== "string" || !unknown.name.trim()) delete unknown.name;
+    unknown.enabled = unknown.enabled !== false;
+    return unknown;
+  }
+  const base = NEW_COMPONENTS[type]();
+  const component = { ...base, ...json, type };
   if (typeof component.id !== "string" || !component.id) component.id = base.id;
   if (typeof component.name !== "string" || !component.name.trim()) component.name = null;
   component.enabled = component.enabled !== false;
+  if (type === "waypoints") {
+    component.altitude = finite(component.altitude, base.altitude);
+    component.points = (Array.isArray(json.points) ? json.points : []).map((p) => normalizeWaypoint(p, component.altitude)).filter(Boolean);
+    if (!(component.speed > 0)) component.speed = base.speed;
+    if (!(component.photoInterval > 0)) component.photoInterval = base.photoInterval;
+  }
+  if (type === "photo" || type === "pano") {
+    if (!isPoint(component.position)) component.position = null;
+    component.heading = finite(component.heading, base.heading);
+    component.gimbalPitch = finite(component.gimbalPitch, base.gimbalPitch);
+    // Siempre toman fotos.
+    component.captureMode = "photo";
+  }
   if (component.type === "orbit" && json.captureMode === undefined) {
     // Formato anterior: photoInterval null quería decir "sin fotos".
     component.captureMode = json.photoInterval ? "photo" : "none";
@@ -582,9 +827,12 @@ export function normalizeComponent(json) {
     capturePriority: CAPTURE_PRIORITIES,
     photoType: PHOTO_TYPES,
     spacing: SPACING_MODES,
-    heading: component.type === "map" ? MAP_HEADINGS : ORBIT_HEADINGS,
     headingReference: HEADING_REFERENCES,
+    panoType: PANO_TYPES,
   };
+  // En la foto y la panorámica el rumbo es un número.
+  if (type === "map") choices.heading = MAP_HEADINGS;
+  if (type === "orbit") choices.heading = ORBIT_HEADINGS;
   for (const [key, options] of Object.entries(choices)) {
     if (key in base && !options.some(([value]) => value === component[key])) component[key] = base[key];
   }
@@ -635,7 +883,8 @@ export function normalizePlan(json) {
 /** El JSON que se guarda: sin campos vacíos, igual que lo escribe el teléfono. */
 export function serializePlan(plan) {
   const compact = (object) => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== null && value !== undefined));
-  return JSON.stringify({ ...compact(plan), components: plan.components.map(compact) }, null, 2) + "\n";
+  const component = (c) => (c.type === "waypoints" && Array.isArray(c.points) ? { ...compact(c), points: c.points.map(compact) } : compact(c));
+  return JSON.stringify({ ...compact(plan), components: plan.components.map(component) }, null, 2) + "\n";
 }
 
 /**
@@ -652,23 +901,48 @@ export function copyComponent(component, gap = 10) {
     const to = pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + gap, y: 0 });
     copy.boundary = Geo.translate(copy.boundary, anchor, to);
     if (copy.start) copy.start = Geo.translate([copy.start], anchor, to)[0];
-  } else {
+  } else if (copy.type === "orbit") {
     const radius = Math.max(copy.radius, copy.finalRadius ?? 0);
     copy.center = pr.toGeo({ x: 2 * radius + gap, y: 0 });
+  } else if (copy.type === "waypoints") {
+    const xs = copy.points.map((p) => pr.toLocal(p.position).x);
+    const to = pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + gap, y: 0 });
+    const moved = Geo.translate(copy.points.map((p) => p.position), anchor, to);
+    copy.points = copy.points.map((p, i) => ({ ...p, position: moved[i] }));
+  } else if (copy.type === "photo" || copy.type === "pano") {
+    copy.position = pr.toGeo({ x: gap, y: 0 });
   }
   return copy;
 }
 
-export const componentName = (component) => component.name || (component.type === "map" ? "Mapa" : "Órbita");
+const TYPE_NAMES = { map: "Mapa", orbit: "Órbita", waypoints: "Waypoints", photo: "Foto", pano: "Panorama" };
 
-/** Punto de referencia del componente: el centro del área o de la órbita. */
+/** "Mapa", "Órbita"…: el nombre del tipo de componente. */
+export const typeName = (component) => TYPE_NAMES[component.type] ?? `Componente nuevo (${component.type})`;
+
+export const componentName = (component) => component.name || typeName(component);
+
+/** Punto de referencia del componente: el centro del área o de la órbita, el primer waypoint o el punto. */
 export function anchorOf(component) {
-  if (component.type === "map") return component.boundary.length ? Geo.centroid(component.boundary) : null;
-  return component.center;
+  switch (component.type) {
+    case "map":
+      return component.boundary.length ? Geo.centroid(component.boundary) : null;
+    case "orbit":
+      return component.center;
+    case "waypoints":
+      return component.points[0]?.position ?? null;
+    case "photo":
+    case "pano":
+      return component.position;
+    default:
+      return null;
+  }
 }
 
 /** Sin marcarlo, el despegue va a esta distancia al sur del primer componente, para no tapar sus puntos. */
 const AUTO_TAKEOFF_METERS = 20;
+/** Con waypoints, una foto o una panorámica, el despegue automático va más lejos de su punto. */
+const POINT_TAKEOFF_METERS = 40;
 
 /** Despegue automático junto a un componente: al sur del área o de la órbita. */
 export function autoTakeoff(component) {
@@ -679,8 +953,12 @@ export function autoTakeoff(component) {
     const south = Math.min(...component.boundary.map((p) => pr.toLocal(p).y));
     return pr.toGeo({ x: 0, y: south - AUTO_TAKEOFF_METERS });
   }
-  const radius = Math.max(component.radius, component.finalRadius ?? 0);
-  return pr.toGeo({ x: 0, y: -(radius + AUTO_TAKEOFF_METERS) });
+  if (component.type === "orbit") {
+    const radius = Math.max(component.radius, component.finalRadius ?? 0);
+    return pr.toGeo({ x: 0, y: -(radius + AUTO_TAKEOFF_METERS) });
+  }
+  // Al sur del primer punto, lo bastante lejos para que la H no lo tape.
+  return pr.toGeo({ x: 0, y: -POINT_TAKEOFF_METERS });
 }
 
 /** Dónde despega el dron: el que se marcó, o junto al primer componente que se vuela. */
@@ -695,11 +973,32 @@ export function takeoffOf(plan) {
 }
 
 export function componentPlan(component, from = null) {
-  return component.type === "map" ? MapPlanner.plan(component, from) : OrbitPlanner.plan(component, from);
+  switch (component.type) {
+    case "map":
+      return MapPlanner.plan(component, from);
+    case "orbit":
+      return OrbitPlanner.plan(component, from);
+    case "waypoints":
+      return PointsPlanner.waypoints(component);
+    case "photo":
+      return PointsPlanner.photo(component);
+    case "pano":
+      return PointsPlanner.pano(component);
+    default:
+      return null;
+  }
 }
 
+/** Altura al empezar el componente (los waypoints empiezan a la del primer punto). */
+export const startAltitude = (component) =>
+  component.type === "waypoints" ? (component.points[0]?.altitude ?? component.altitude) : component.altitude;
+
 /** Altura al terminar el componente (una espiral puede acabar más alta o más baja). */
-export const endAltitude = (component) => (component.type === "orbit" ? (component.finalAltitude ?? component.altitude) : component.altitude);
+export function endAltitude(component) {
+  if (component.type === "orbit") return component.finalAltitude ?? component.altitude;
+  if (component.type === "waypoints") return component.points.at(-1)?.altitude ?? component.altitude;
+  return component.altitude;
+}
 
 export const PlanPlanner = {
   /**
@@ -733,7 +1032,7 @@ export const PlanPlanner = {
       items.push(item);
       if (!component.enabled || !item.result) return;
       const start = item.result.path[0];
-      if (position) item.approach = transit(position, start, altitude, component.altitude, flown === 0 ? "takeoff" : "between");
+      if (position) item.approach = transit(position, start, altitude, startAltitude(component), flown === 0 ? "takeoff" : "between");
       durationSeconds += item.result.durationSeconds;
       lengthMeters += item.result.lengthMeters;
       photoCount += item.result.photoCount;
@@ -753,11 +1052,21 @@ export const PlanPlanner = {
   },
 };
 
-/** Todos los puntos del plan, para encuadrarlo en el mapa. */
-/** Los puntos de un componente: las esquinas del área o el círculo de la órbita. */
+/** Los puntos de un componente: las esquinas del área, el círculo de la órbita o los waypoints. */
 export function componentPoints(component) {
-  if (component.type === "map") return component.boundary;
-  return OrbitPlanner.plan(component)?.path ?? [];
+  switch (component.type) {
+    case "map":
+      return component.boundary;
+    case "orbit":
+      return OrbitPlanner.plan(component)?.path ?? [];
+    case "waypoints":
+      return component.points.map((p) => p.position);
+    case "photo":
+    case "pano":
+      return component.position ? [component.position] : [];
+    default:
+      return [];
+  }
 }
 
 /** Todos los puntos del plan, con el despegue aunque sea automático, para encuadrarlo en el mapa. */
@@ -780,8 +1089,41 @@ export function formatDuration(seconds) {
 const num = (value, decimals = 0) =>
   value.toLocaleString(LOCALE, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
+/** "N", "NE"… para un rumbo, como en una brújula. */
+export function compass(heading) {
+  return ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(Geo.normalize(heading) / 45) % 8];
+}
+
 /** Resumen de un componente, como "10 m | 0.1 ha | Grid | 75% | 70%" en Dronelink. */
 export function componentSummary(component) {
+  if (!isKnown(component)) return "No se vuela con esta versión";
+  if (component.type === "waypoints") {
+    if (!component.points.length) return `${num(component.altitude)} m · sin puntos`;
+    const altitudes = component.points.map((p) => p.altitude);
+    const low = Math.min(...altitudes);
+    const high = Math.max(...altitudes);
+    const n = component.points.length;
+    const photos = component.points.filter((p) => p.action === "photo").length;
+    return [
+      low === high ? `${num(low)} m` : `${num(low)}–${num(high)} m`,
+      `${n} ${n === 1 ? "punto" : "puntos"}`,
+      photos ? `${photos} con foto` : null,
+      component.captureMode === "photo" ? `fotos cada ${num(component.photoInterval, component.photoInterval % 1 ? 1 : 0)} s` : null,
+      component.captureMode === "video" ? "video" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (component.type === "photo") {
+    if (!component.position) return `${num(component.altitude)} m · sin punto`;
+    const type = component.photoType === "single" ? "" : ` · ${PHOTO_TYPES.find(([k]) => k === component.photoType)?.[1] ?? ""}`;
+    return `${num(component.altitude)} m · mira al ${compass(component.heading)} · cámara ${num(component.gimbalPitch)}°${type}`;
+  }
+  if (component.type === "pano") {
+    if (!component.position) return `${num(component.altitude)} m · sin punto`;
+    const label = PANO_TYPES.find(([k]) => k === component.panoType)?.[1] ?? "";
+    return `${num(component.altitude)} m · ${label} · ${PanoPlan.shots(component.panoType, component.heading, component.gimbalPitch).length} fotos`;
+  }
   if (component.type === "map") {
     if (component.boundary.length < 3) return `${num(component.altitude)} m · sin área`;
     const area = Geo.area(component.boundary) / 10000;
