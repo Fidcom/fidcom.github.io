@@ -54,7 +54,9 @@ import {
   newWaypointsComponent,
   normalizePlan,
   num,
-  parseKml,
+  importKml as readKmlText,
+  FlightPreview,
+  exportKml,
   planPoints,
   componentPoints,
   projection,
@@ -64,9 +66,9 @@ import {
   typeName,
   waypointHeading,
   TerrainFollow,
-} from "./planner.js?v=20261028c";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261028c";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261028c";
+} from "./planner.js?v=20261029a";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029a";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029a";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -181,8 +183,15 @@ const handleLayer = L.layerGroup();
 
 /** Espacio que tapa el panel, para centrar la misión en la parte visible del mapa. */
 function fitPadding() {
-  if (window.innerWidth <= 760) return { paddingTopLeft: [24, 72], paddingBottomRight: [24, window.innerHeight * 0.52 + 32] };
-  return { paddingTopLeft: [$("panel").offsetWidth + 60, 80], paddingBottomRight: [80, 60] };
+  const padding =
+    window.innerWidth <= 760
+      ? // En el teléfono la vista previa esconde el panel.
+        { paddingTopLeft: [24, 72], paddingBottomRight: [24, document.body.classList.contains("previewing") ? 24 : window.innerHeight * 0.52 + 32] }
+      : { paddingTopLeft: [$("panel").offsetWidth + 60, 80], paddingBottomRight: [80, 60] };
+  // Con la vista previa abierta, tampoco debajo de su barra.
+  const bar = $("preview-bar");
+  if (!bar.hidden) padding.paddingBottomRight[1] = Math.max(padding.paddingBottomRight[1], window.innerHeight - bar.getBoundingClientRect().top + 24);
+  return padding;
 }
 
 function fitTo(points, maxZoom = 19) {
@@ -505,6 +514,7 @@ function openPlan(id, plan = null, componentId = null) {
 /** Muestra el plan (null) o uno de sus componentes. */
 function showView(componentId) {
   document.activeElement?.blur?.();
+  closePreview();
   const next = current.components.some((c) => c.id === componentId) ? componentId : null;
   if (next !== selectedId) selectedPoint = null;
   selectedId = next;
@@ -520,6 +530,7 @@ function showView(componentId) {
 
 function closeEditor() {
   if (!current) return;
+  closePreview();
   document.activeElement?.blur?.();
   // Una misión nueva sin área ni centro no se guarda.
   if (!hasGeometry(current) && !state.shas[current.id] && state.missions[current.id]) {
@@ -1515,6 +1526,11 @@ function buttonRow(params, buttons) {
 // ---------- Panel del plan ----------
 
 function buildPlanBody(body) {
+  if (planResult?.flown) {
+    const play = buttonParam(body, "Ver el vuelo", () => openPreview());
+    play.className = "button primary small wide preview-button";
+    play.insertAdjacentHTML("afterbegin", '<svg><use href="#i-play" /></svg>');
+  }
   section(body, "COMPONENTES");
   if (current.components.length === 0) {
     note(
@@ -1550,7 +1566,7 @@ function buildPlanBody(body) {
       ["waypoints", "Waypoints", "Un recorrido por puntos, con foto o espera en cada uno", () => addComponent(newWaypointsComponent())],
       ["camera", "Foto", "Una foto desde un punto, mirando hacia donde quieras", () => addComponent(newPhotoComponent())],
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => addComponent(newPanoComponent())],
-      ["upload", "Mapa desde KML o KMZ", "Importa el área de un archivo", () => importKml("component")],
+      ["upload", "Desde un KML o KMZ", "Áreas, líneas o puntos de Google Earth, Dronelink o DJI", () => importKml("component")],
     ]);
   });
   body.append(add);
@@ -1591,6 +1607,13 @@ function buildPlanBody(body) {
       buildPanel();
     });
   }
+
+  section(body, "ARCHIVO");
+  buttonRow(body, [
+    ["Exportar KMZ", hasGeometry(current) ? () => exportPlan(true) : null],
+    ["Exportar KML", hasGeometry(current) ? () => exportPlan(false) : null],
+  ]);
+  note(body, "Para verla en 3D en Google Earth. El archivo trae la misión entera: al importarlo aquí o en el teléfono queda igual.");
 }
 
 /** Tiempo de cada tramo del plan, como el "Mission Estimate" de Dronelink. */
@@ -2749,44 +2772,103 @@ $("kml-file").addEventListener("change", async (event) => {
   if (!file) return;
   try {
     const text = await readKml(file);
-    const result = text && parseKml(text);
-    if (!result) {
-      toast("Ese archivo no tiene un área (polígono) que se pueda usar", true);
+    const result = text ? readKmlText(text) : null;
+    const imported = result?.plan?.components ?? result?.components ?? [];
+    if (!imported.length) {
+      toast("Ese archivo no tiene áreas, líneas ni puntos que se puedan usar", true);
       return;
     }
-    const component = newMapComponent(result.points);
-    component.direction = MapPlanner.longestEdgeDirection(component.boundary) ?? 0;
     if (kmlTarget === "component" && current) {
-      addComponent(component);
+      // Se añaden a la misión abierta; uno que repita el identificador de otro recibe uno nuevo.
+      const ids = new Set(current.components.map((c) => c.id));
+      const added = imported.map((c) => (ids.has(c.id) ? { ...c, id: newMapComponent().id } : c));
+      changePlan(() => current.components.push(...added), added.length === 1 ? added[0].id : null);
     } else {
-      const plan = newPlan(result.name || file.name.replace(/\.km[lz]$/i, ""), [component]);
+      const plan = result.plan ? { ...result.plan, id: newPlan().id, updatedAt: Date.now() } : newPlan(result.name || file.name.replace(/\.km[lz]$/i, ""), imported);
       state.missions[plan.id] = plan;
       state.dirty[plan.id] = true;
       persist();
       scheduleSync();
-      openPlan(plan.id, null, component.id);
+      openPlan(plan.id, null, plan.components.length === 1 ? plan.components[0].id : null);
     }
-    toast(`Área importada: ${component.boundary.length} esquinas`);
+    toast(result.plan ? `Misión importada: ${imported.length} ${imported.length === 1 ? "componente" : "componentes"}` : `Importado: ${importedText(imported)}`);
   } catch (error) {
     toast(`No se pudo leer el archivo: ${error.message}`, true);
   }
 });
 
-/** Un KMZ es un ZIP con el KML adentro; JSZip se carga solo cuando hace falta. */
+/** "1 mapa, 2 corredores y 1 recorrido de 12 puntos". */
+function importedText(components) {
+  const count = (type) => components.filter((c) => c.type === type).length;
+  const parts = [];
+  const add = (n, one, many) => n && parts.push(`${n} ${n === 1 ? one : many}`);
+  add(count("map"), "mapa", "mapas");
+  add(count("corridor"), "corredor", "corredores");
+  add(count("orbit"), "órbita", "órbitas");
+  for (const c of components.filter((c) => c.type === "waypoints")) parts.push(`un recorrido de ${c.points.length} puntos`);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}` : parts[0];
+}
+
+/** JSZip se carga solo cuando hace falta (para leer o crear un KMZ). */
+async function loadJsZip() {
+  if (window.JSZip) return window.JSZip;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("no se pudo cargar el lector de KMZ"));
+    document.head.append(script);
+  });
+  return window.JSZip;
+}
+
+/**
+ * Guarda la misión como KMZ (o KML) para Google Earth. Con internet, las alturas van sobre el nivel
+ * del mar con los datos del suelo; sin ellos, sobre el suelo.
+ */
+async function exportPlan(kmz) {
+  const plan = current;
+  if (!plan || !hasGeometry(plan)) return toast("La misión todavía no tiene nada que exportar", true);
+  let ground = null;
+  const takeoff = takeoffOf(plan);
+  if (takeoff) {
+    await ensureTerrain(planPoints(plan));
+    const base = terrain.elevation(takeoff);
+    if (base !== null) ground = TerrainFollow.reference(terrain, base);
+  }
+  let kml;
+  try {
+    kml = exportKml(plan, ground);
+  } catch {
+    // Falta el suelo en parte de la ruta: mejor todo sobre el suelo que a medias.
+    ground = null;
+    kml = exportKml(plan);
+  }
+  const name = plan.name.replace(/[\\/:*?"<>|]+/g, " ").trim() || "Misión";
+  let blob;
+  if (kmz) {
+    const JSZip = await loadJsZip();
+    const zip = new JSZip();
+    zip.file("doc.kml", kml);
+    blob = await zip.generateAsync({ type: "blob", mimeType: "application/vnd.google-earth.kmz", compression: "DEFLATE" });
+  } else {
+    blob = new Blob([kml], { type: "application/vnd.google-earth.kml+xml" });
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${name}.${kmz ? "kmz" : "kml"}`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+  toast(ground ? `Exportado ${link.download}` : `Exportado ${link.download} (sin datos del terreno: alturas sobre el suelo)`);
+}
+
+/** Un KMZ es un ZIP con el KML adentro (DJI lo guarda en wpmz/template.kml). */
 async function readKml(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) return new TextDecoder().decode(bytes);
-  if (!window.JSZip) {
-    await new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-      script.onload = resolve;
-      script.onerror = () => reject(new Error("no se pudo cargar el lector de KMZ"));
-      document.head.append(script);
-    });
-  }
-  const zip = await window.JSZip.loadAsync(bytes);
-  const entry = Object.values(zip.files).find((f) => f.name.toLowerCase().endsWith(".kml"));
+  const zip = await (await loadJsZip()).loadAsync(bytes);
+  const entries = Object.values(zip.files).filter((f) => f.name.toLowerCase().endsWith(".kml"));
+  const entry = entries.find((f) => /(^|\/)doc\.kml$/i.test(f.name)) ?? entries[0];
   return entry ? entry.async("string") : null;
 }
 
@@ -2884,7 +2966,9 @@ setBase(baseLayers[storage.get(BASE_KEY)] ? storage.get(BASE_KEY) : "bing");
 setLabels(storage.get(LABELS_KEY) !== "0");
 
 document.addEventListener("keydown", (event) => {
-  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+  const active = document.activeElement;
+  // Una barra deslizante no es para escribir: ahí siguen andando los atajos.
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(active?.tagName) && active.type !== "range";
   const mod = event.ctrlKey || event.metaKey;
   if (mod && !typing && event.key.toLowerCase() === "z") {
     event.preventDefault();
@@ -2897,11 +2981,169 @@ document.addEventListener("keydown", (event) => {
     $("layer-menu").hidden = true;
   } else if (event.key === "Escape" && $("add-menu")) {
     $("add-menu").remove();
+  } else if (preview.timeline && event.key === "Escape") {
+    closePreview();
+  } else if (preview.timeline && event.key === " " && !typing) {
+    event.preventDefault();
+    togglePreview();
   } else if (event.key === "Escape" && !typing && current && !$("sync-dialog").open) {
     if (selectedId) componentBack();
     else closeEditor();
   }
 });
+
+// ---------- Vista previa del vuelo ----------
+
+/** La vista previa animada, como la de Dronelink: el dron recorre la misión a ×10, ×30 o ×100. */
+const preview = { timeline: null, time: 0, speed: 30, playing: false, frame: 0, last: 0, layer: L.layerGroup(), drone: null, trail: [], footprint: null };
+const PREVIEW_SPEED_KEY = "mini4pro.previewSpeed";
+preview.speed = Number(storage.get(PREVIEW_SPEED_KEY)) || 30;
+
+const clock = (seconds) => {
+  const s = Math.max(0, Math.round(seconds));
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+function openPreview() {
+  if (!current) return;
+  closePreview();
+  const timeline = FlightPreview.timeline(current);
+  if (!timeline.segments.length) return toast("La misión todavía no tiene nada que volar", true);
+  preview.timeline = timeline;
+  preview.time = 0;
+  const path = [timeline.segments[0].from.position, ...timeline.segments.map((s) => s.to.position)];
+  // Toda la ruta tenue y lo ya volado en blanco, que se distinga de las líneas de los componentes.
+  L.polyline(path, { color: "#fff", weight: 2, opacity: 0.4, dashArray: "4 6", interactive: false }).addTo(preview.layer);
+  preview.trail = [
+    L.polyline([], { color: "#000", weight: 7, opacity: 0.3, interactive: false }),
+    L.polyline([], { color: "#fff", weight: 3.5, opacity: 1, interactive: false }),
+  ];
+  preview.trail.forEach((line) => line.addTo(preview.layer));
+  preview.footprint = L.polygon([], { color: "#fff", weight: 1.5, fillColor: ACCENT, fillOpacity: 0.18, interactive: false }).addTo(preview.layer);
+  preview.drone = L.marker(path[0], {
+    icon: L.divIcon({
+      className: "",
+      html: `<div class="preview-drone"><svg class="cone" viewBox="0 0 120 120"><path d="M60,60 L${60 + 58 * Math.sin(rad(-LENS_DEGREES / 2))},${60 - 58 * Math.cos(rad(-LENS_DEGREES / 2))} A58,58 0 0 1 ${60 + 58 * Math.sin(rad(LENS_DEGREES / 2))},${60 - 58 * Math.cos(rad(LENS_DEGREES / 2))} Z" /></svg><span class="body"><svg viewBox="0 0 24 24"><path d="M12,3 L19,20 L12,16 L5,20 Z" /></svg></span></div>`,
+      iconSize: [120, 120],
+      iconAnchor: [60, 60],
+    }),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 2000,
+  }).addTo(preview.layer);
+  preview.layer.addTo(map);
+  $("map-hint").hidden = true;
+  $("preview-bar").hidden = false;
+  document.body.classList.add("previewing");
+  $("preview-total").textContent = clock(timeline.duration);
+  document.querySelectorAll("#preview-bar [data-speed]").forEach((b) => b.classList.toggle("selected", Number(b.dataset.speed) === preview.speed));
+  fitTo(planPoints(current));
+  showPreviewFrame();
+  playPreview(true);
+}
+
+function closePreview() {
+  if (!preview.timeline) return;
+  playPreview(false);
+  preview.timeline = null;
+  preview.layer.clearLayers();
+  map.removeLayer(preview.layer);
+  $("preview-bar").hidden = true;
+  document.body.classList.remove("previewing");
+  if (current) updateHint();
+}
+
+function playPreview(on) {
+  preview.playing = on;
+  cancelAnimationFrame(preview.frame);
+  const button = $("preview-play");
+  button.querySelector("use").setAttribute("href", on ? "#i-pause" : "#i-play");
+  button.title = on ? "Pausar (espacio)" : "Reproducir (espacio)";
+  button.setAttribute("aria-label", on ? "Pausar" : "Reproducir");
+  if (!on) return;
+  // Al final, vuelve a empezar.
+  if (preview.time >= preview.timeline.duration) preview.time = 0;
+  preview.last = performance.now();
+  const step = (now) => {
+    if (!preview.playing || !preview.timeline) return;
+    preview.time = Math.min(preview.timeline.duration, preview.time + ((now - preview.last) / 1000) * preview.speed);
+    preview.last = now;
+    showPreviewFrame(true);
+    if (preview.time >= preview.timeline.duration) playPreview(false);
+    else preview.frame = requestAnimationFrame(step);
+  };
+  preview.frame = requestAnimationFrame(step);
+}
+
+const togglePreview = () => playPreview(!preview.playing);
+
+/** Pone el dron, su rastro y lo que ve en el momento `preview.time`. Con `follow`, mueve el mapa si se sale. */
+function showPreviewFrame(follow = false) {
+  const { timeline } = preview;
+  const state = FlightPreview.at(timeline, preview.time);
+  if (!state) return;
+  preview.drone.setLatLng(state.position);
+  const el = preview.drone.getElement()?.querySelector(".preview-drone");
+  if (el) {
+    el.style.setProperty("--heading", `${state.heading}deg`);
+    // En un mapa o un corredor la cámara mira hacia abajo: se ve lo que cubre la foto, no un abanico.
+    const c = state.component;
+    const down = state.kind === "route" && (c?.type === "map" || c?.type === "corridor") && c.gimbalPitch <= -60;
+    el.classList.toggle("down", down || state.kind === "transit");
+  }
+  const done = timeline.segments.slice(0, state.index).map((s) => s.from.position);
+  const flown = [...done, timeline.segments[state.index].from.position, state.position];
+  preview.trail.forEach((line) => line.setLatLngs(flown));
+
+  const c = state.component;
+  if (state.kind === "route" && (c?.type === "map" || c?.type === "corridor") && c.gimbalPitch <= -60) {
+    const [w, h] = MapPlanner.footprint(cameraFor(c), Math.max(1, state.altitude));
+    const local = projection(state.position);
+    const a = rad(state.heading);
+    const corner = (x, y) => local.toGeo({ x: x * Math.cos(a) + y * Math.sin(a), y: -x * Math.sin(a) + y * Math.cos(a) });
+    preview.footprint.setLatLngs([corner(-w / 2, -h / 2), corner(w / 2, -h / 2), corner(w / 2, h / 2), corner(-w / 2, h / 2)]);
+  } else {
+    preview.footprint.setLatLngs([]);
+  }
+
+  $("preview-label").textContent = state.label;
+  const above = c && TerrainFollow.follows(c) && state.kind !== "transit" ? " sobre el suelo" : "";
+  const stats = [`${num(state.altitude)} m${above}`];
+  if (timeline.photoCount) stats.push(`${state.photos} de ${timeline.photoCount} fotos`);
+  $("preview-stats").textContent = stats.join(" · ");
+  $("preview-time").textContent = clock(preview.time);
+  $("preview-scrub").value = String(Math.round((preview.time / timeline.duration) * 1000));
+  if (follow) keepInView(state.position);
+}
+
+/** Si el dron se sale de lo que se ve (fuera del panel y de la barra), centra el mapa en él. */
+function keepInView(position) {
+  const {
+    paddingTopLeft: [left, top],
+    paddingBottomRight: [right, bottom],
+  } = fitPadding();
+  const size = map.getSize();
+  const box = { left: left - 40, top: top - 40, right: size.x - right + 40, bottom: size.y - bottom + 20 };
+  const p = map.latLngToContainerPoint(position);
+  if (p.x > box.left && p.x < box.right && p.y > box.top && p.y < box.bottom) return;
+  map.panBy([p.x - (box.left + box.right) / 2, p.y - (box.top + box.bottom) / 2], { animate: true, duration: 0.4 });
+}
+
+$("preview-play").addEventListener("click", togglePreview);
+$("preview-close").addEventListener("click", closePreview);
+$("preview-scrub").addEventListener("input", (event) => {
+  if (!preview.timeline) return;
+  playPreview(false);
+  preview.time = (Number(event.target.value) / 1000) * preview.timeline.duration;
+  showPreviewFrame(true);
+});
+document.querySelectorAll("#preview-bar [data-speed]").forEach((button) =>
+  button.addEventListener("click", () => {
+    preview.speed = Number(button.dataset.speed);
+    storage.set(PREVIEW_SPEED_KEY, String(preview.speed));
+    document.querySelectorAll("#preview-bar [data-speed]").forEach((b) => b.classList.toggle("selected", b === button));
+  }),
+);
 
 // ---------- Buscar lugares ----------
 

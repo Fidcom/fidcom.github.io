@@ -1369,13 +1369,13 @@ export const TerrainFollow = {
   },
 
   /**
-   * El suelo y la altura del dron a lo largo de `path` cada STEP m: [{distance, ground, altitude}],
+   * El suelo y la altura del dron a lo largo de `path` cada STEP m: [{distance, ground, altitude, position}],
    * todo sobre el despegue. `agl`: la altura sobre el suelo en cada punto de `path`.
    */
   alongRoute(ref, path, agl) {
     if (!path.length) return [];
     const first = ref.ground(path[0]);
-    const points = [{ distance: 0, ground: first, altitude: agl[0] + first }];
+    const points = [{ distance: 0, ground: first, altitude: agl[0] + first, position: path[0] }];
     let walked = 0;
     for (let i = 1; i < path.length; i++) {
       const length = Geo.distance(path[i - 1], path[i]);
@@ -1384,8 +1384,9 @@ export const TerrainFollow = {
       const to = proj.toLocal(path[i]);
       for (let k = 1; k <= n; k++) {
         const f = k / n;
-        const ground = ref.ground(proj.toGeo({ x: to.x * f, y: to.y * f }));
-        points.push({ distance: walked + length * f, ground, altitude: agl[i - 1] + (agl[i] - agl[i - 1]) * f + ground });
+        const position = proj.toGeo({ x: to.x * f, y: to.y * f });
+        const ground = ref.ground(position);
+        points.push({ distance: walked + length * f, ground, altitude: agl[i - 1] + (agl[i] - agl[i - 1]) * f + ground, position });
       }
       walked += length;
     }
@@ -1515,23 +1516,326 @@ export function summary(plan) {
 
 export { num };
 
-// ---- Importar KML ----
+// ---- Vista previa ----
 
-/** Lee el primer polígono (o la primera línea) de un KML. Devuelve {name, points} o null. */
-export function parseKml(text) {
-  const polygon = text.match(/<(?:\w+:)?Polygon\b[\s\S]*?<\/(?:\w+:)?Polygon>/);
-  const source = polygon ? polygon[0] : text;
-  const coords = source.match(/<(?:\w+:)?coordinates>([\s\S]*?)<\/(?:\w+:)?coordinates>/);
-  if (!coords) return null;
-  let points = coords[1]
+/**
+ * El vuelo de la misión en el tiempo, para la vista previa animada: tramos con su principio y su
+ * fin (posición y altura sobre el despegue), que suman el mismo tiempo que el estimado.
+ */
+export const FlightPreview = {
+  timeline(plan) {
+    const result = PlanPlanner.plan(plan);
+    const segments = [];
+    let time = 0;
+    const push = (from, to, seconds, info) => {
+      if (!(seconds > 0)) return;
+      segments.push({ t0: time, t1: time + seconds, from, to, ...info });
+      time += seconds;
+    };
+    // Como los tránsitos del piloto automático: sube donde está, va en línea recta y baja al llegar.
+    const transit = (from, to, label) => {
+      const cruise = Math.max(from.altitude, to.altitude);
+      const info = { label, kind: "transit", photos: [photos, photos] };
+      push(from, { ...from, altitude: cruise }, (cruise - from.altitude) / VERTICAL_SPEED, info);
+      push({ ...from, altitude: cruise }, { ...to, altitude: cruise }, Geo.distance(from.position, to.position) / plan.transitSpeed, info);
+      push({ ...to, altitude: cruise }, to, (cruise - to.altitude) / VERTICAL_SPEED, info);
+    };
+
+    let here = result.takeoff ? { position: result.takeoff, altitude: 0 } : null;
+    let photos = 0;
+    for (const item of result.items) {
+      const { component, result: route } = item;
+      if (!component.enabled || !route) continue;
+      const label = `${item.number}. ${componentName(component)}`;
+      const altitudes = routeAltitudes(component, route.path);
+      const points = route.path.map((position, i) => ({ position, altitude: altitudes[i] }));
+      if (here) transit(here, points[0], `Hacia ${label}`);
+      const info = { label, kind: "route", component };
+      if (points.length === 1) {
+        // Una foto o una panorámica: quieto en el punto (la panorámica da la vuelta).
+        push(points[0], points[0], route.durationSeconds, { ...info, kind: "shot", photos: [photos, photos + route.photoCount] });
+      } else {
+        const lengths = points.slice(1).map((p, i) => Geo.distance(points[i].position, p.position));
+        const total = lengths.reduce((a, b) => a + b, 0);
+        let walked = 0;
+        lengths.forEach((length, i) => {
+          const share = total > 0 ? length / total : 1 / lengths.length;
+          const p0 = photos + (route.photoCount * walked) / (total || 1);
+          walked += length;
+          const p1 = photos + (route.photoCount * walked) / (total || 1);
+          push(points[i], points[i + 1], route.durationSeconds * share, { ...info, photos: [p0, p1] });
+        });
+      }
+      photos += route.photoCount;
+      here = points.at(-1);
+    }
+    if (here && result.home) {
+      const home = { position: result.takeoff, altitude: here.altitude };
+      const info = { label: "Regreso al despegue", kind: "transit", photos: [photos, photos] };
+      push(here, home, Geo.distance(here.position, home.position) / plan.transitSpeed, info);
+      push(home, { ...home, altitude: 0 }, home.altitude / VERTICAL_SPEED, { ...info, label: "Aterrizando" });
+    } else if (here && result.landingSeconds > 0) {
+      push(here, { ...here, altitude: 0 }, result.landingSeconds, { label: "Aterrizando", kind: "transit", photos: [photos, photos] });
+    }
+
+    // Hacia dónde mira en cada tramo: hacia donde va o, quieto, como venía.
+    let heading = 0;
+    for (const segment of segments) {
+      const c = segment.component;
+      if (segment.kind === "shot") heading = c.type === "photo" || c.type === "pano" ? c.heading : heading;
+      else if (Geo.distance(segment.from.position, segment.to.position) > 0.5) heading = Geo.bearing(segment.from.position, segment.to.position);
+      segment.heading = heading;
+      // La panorámica (sin ser angular o vertical) gira entera.
+      segment.turn = segment.kind === "shot" && c.type === "pano" && c.panoType !== "vertical" ? 360 : 0;
+    }
+    return { duration: time, segments, photoCount: result.photoCount, takeoff: result.takeoff };
+  },
+
+  /** Dónde está el dron a los `time` segundos: posición, altura, rumbo, qué hace y cuántas fotos lleva. */
+  at(timeline, time) {
+    const { segments } = timeline;
+    if (!segments.length) return null;
+    const t = Math.min(Math.max(0, time), timeline.duration);
+    let lo = 0;
+    let hi = segments.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (segments[mid].t1 <= t) lo = mid + 1;
+      else hi = mid;
+    }
+    const segment = segments[lo];
+    const f = Math.min(1, Math.max(0, (t - segment.t0) / (segment.t1 - segment.t0)));
+    const lerp = (a, b) => a + (b - a) * f;
+    let heading = segment.heading + segment.turn * f;
+    // En una órbita que mira al centro, hacia el centro.
+    const c = segment.component;
+    const position = [lerp(segment.from.position[0], segment.to.position[0]), lerp(segment.from.position[1], segment.to.position[1])];
+    if (c?.type === "orbit" && c.heading === "center" && c.center) heading = Geo.bearing(position, c.center);
+    return {
+      index: lo,
+      position,
+      altitude: lerp(segment.from.altitude, segment.to.altitude),
+      heading: ((heading % 360) + 360) % 360,
+      label: segment.label,
+      kind: segment.kind,
+      component: c ?? null,
+      photos: Math.floor(lerp(segment.photos[0], segment.photos[1]) + 1e-9),
+    };
+  },
+};
+
+// ---- KML y KMZ ----
+
+const KML_DEFAULT_ALTITUDE = 30;
+/** Hasta cuántos componentes se sacan de un archivo (uno de Google Earth puede traer cientos de cosas). */
+const KML_MAX_COMPONENTS = 30;
+
+const kmlTag = (name) => `(?:\\w+:)?${name}`;
+const kmlBlocks = (text, name) => [...text.matchAll(new RegExp(`<${kmlTag(name)}\\b[^>]*>([\\s\\S]*?)</${kmlTag(name)}>`, "g"))].map((m) => m[1]);
+const kmlFirst = (text, name) => kmlBlocks(text, name)[0] ?? null;
+
+/** El texto de un elemento: lo de adentro de CDATA tal cual, o con las entidades de XML convertidas. */
+function kmlText(raw) {
+  if (raw === null) return null;
+  const cdata = [...raw.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)];
+  if (cdata.length) return cdata.map((m) => m[1]).join("");
+  return raw
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+const kmlNumber = (text, name) => {
+  const value = Number(kmlText(kmlFirst(text, name)));
+  return kmlFirst(text, name) !== null && Number.isFinite(value) ? value : null;
+};
+
+/** Los puntos de <coordinates>: [lat, lon] y la altura (o null). */
+function kmlCoordinates(text) {
+  const raw = kmlFirst(text, "coordinates");
+  if (raw === null) return [];
+  return raw
     .trim()
     .split(/\s+/)
     .map((tuple) => tuple.split(",").map(Number))
     .filter((p) => p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
-    .map(([lon, lat]) => [lat, lon]);
-  // El KML repite el primer punto al final para cerrar el polígono.
-  if (points.length > 1 && points[0][0] === points.at(-1)[0] && points[0][1] === points.at(-1)[1]) points = points.slice(0, -1);
-  if (points.length < 3) return null;
-  const name = text.match(/<(?:\w+:)?name>([\s\S]*?)<\/(?:\w+:)?name>/)?.[1]?.trim() || null;
-  return { name, points };
+    .map(([lon, lat, alt]) => ({ position: [round7(lat), round7(lon)], altitude: Number.isFinite(alt) ? alt : null }));
+}
+
+const round7 = (x) => Math.round(x * 1e7) / 1e7;
+
+/**
+ * Lee un KML (de Google Earth, de Dronelink, de DJI o de esta app). Devuelve {name, plan,
+ * components}: `plan` si el archivo es de esta app (trae la misión entera); si no, los
+ * componentes que salen de él:
+ * - cada polígono, un mapa;
+ * - cada línea, un corredor;
+ * - los puntos, un recorrido de waypoints (o, si es uno solo, el centro de una órbita).
+ * Los waypoints de DJI (WPML) traen su altura y su velocidad.
+ */
+export function importKml(text) {
+  const withoutPlacemarks = text.replace(new RegExp(`<${kmlTag("Placemark")}\\b[\\s\\S]*?</${kmlTag("Placemark")}>`, "g"), "");
+  const name = kmlText(kmlFirst(withoutPlacemarks, "name")) || kmlText(kmlFirst(text, "name")) || null;
+
+  // Una misión de esta app: va entera en los datos del documento.
+  const embedded = text.match(/<(?:\w+:)?Data\s+name="mini4pro"\s*>\s*<(?:\w+:)?value>([\s\S]*?)<\/(?:\w+:)?value>/);
+  if (embedded) {
+    try {
+      return { name, plan: normalizePlan(JSON.parse(kmlText(embedded[1]))), components: [] };
+    } catch {
+      // Si no se puede leer, se toma como un KML cualquiera.
+    }
+  }
+
+  const wpml = /<wpml:/.test(text);
+  const heightMode = kmlText(kmlFirst(text, "heightMode")) ?? kmlText(kmlFirst(text, "executeHeightMode"));
+  const globalHeight = kmlNumber(withoutPlacemarks, "globalHeight");
+  const speed = kmlNumber(withoutPlacemarks, "autoFlightSpeed") ?? kmlNumber(withoutPlacemarks, "globalTransitionalSpeed");
+
+  const components = [];
+  const points = [];
+  for (const placemark of kmlBlocks(text, "Placemark")) {
+    const label = kmlText(kmlFirst(placemark, "name")) || null;
+    for (const polygon of kmlBlocks(placemark, "Polygon")) {
+      let ring = kmlCoordinates(kmlFirst(polygon, "outerBoundaryIs") ?? polygon).map((c) => c.position);
+      // El KML repite el primer punto al final para cerrar el polígono.
+      if (ring.length > 1 && ring[0][0] === ring.at(-1)[0] && ring[0][1] === ring.at(-1)[1]) ring = ring.slice(0, -1);
+      if (ring.length < 3) continue;
+      const map = { ...newMapComponent(ring), name: label };
+      map.direction = MapPlanner.longestEdgeDirection(ring) ?? 0;
+      components.push(map);
+    }
+    for (const line of kmlBlocks(placemark, "LineString")) {
+      const path = kmlCoordinates(line).map((c) => c.position);
+      if (path.length >= 2) components.push({ ...newCorridorComponent(path), name: label });
+    }
+    for (const point of kmlBlocks(placemark, "Point")) {
+      const [coordinate] = kmlCoordinates(point);
+      if (!coordinate) continue;
+      const mode = kmlText(kmlFirst(point, "altitudeMode"));
+      let altitude = null;
+      if (wpml) {
+        const own = kmlNumber(placemark, "useGlobalHeight") === 1 ? null : kmlNumber(placemark, "height") ?? kmlNumber(placemark, "executeHeight");
+        altitude = own ?? globalHeight;
+      } else if (mode === "relativeToGround") {
+        altitude = coordinate.altitude;
+      }
+      points.push({ position: coordinate.position, altitude: altitude > 0 ? altitude : null, aboveGround: !wpml && mode === "relativeToGround", index: kmlNumber(placemark, "index"), name: label });
+    }
+  }
+
+  if (points.length === 1 && !wpml) {
+    components.push({ ...newOrbitComponent(points[0].position), name: points[0].name });
+  } else if (points.length) {
+    // Los de DJI traen su orden; los demás van en el orden del archivo.
+    if (points.every((p) => p.index !== null)) points.sort((a, b) => a.index - b.index);
+    const waypoints = newWaypointsComponent(points.map((p) => newWaypoint(p.position, p.altitude ?? KML_DEFAULT_ALTITUDE)));
+    waypoints.terrainFollow = wpml ? heightMode === "aboveGroundLevel" || heightMode === "realTimeFollowSurface" : points.every((p) => p.aboveGround && p.altitude !== null);
+    if (speed > 0) waypoints.speed = Math.min(15, Math.max(1, speed));
+    components.push(waypoints);
+  }
+  return { name, plan: null, components: components.slice(0, KML_MAX_COMPONENTS) };
+}
+
+const xmlEscape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** CDATA que aguanta cualquier texto (un "]]>" adentro se parte en dos). */
+const cdata = (text) => `<![CDATA[${String(text).replaceAll("]]>", "]]]]><![CDATA[>")}]]>`;
+const kmlCoords = (points) => points.map(({ position: [lat, lon], altitude }) => `${round7(lon)},${round7(lat)},${Math.round(altitude * 10) / 10}`).join(" ");
+
+/** La altura sobre el despegue de cada punto de la ruta de un componente (sin seguir el terreno). */
+function routeAltitudes(component, path) {
+  if (component.type === "waypoints" && component.points.length === path.length) return component.points.map((p) => p.altitude);
+  if (component.type === "orbit") {
+    const to = component.finalAltitude ?? component.altitude;
+    return path.map((_, i) => component.altitude + ((to - component.altitude) * i) / Math.max(1, path.length - 1));
+  }
+  return path.map(() => component.altitude);
+}
+
+/**
+ * La misión como KML para Google Earth: la ruta en 3D (tránsitos aparte), las áreas, los puntos y
+ * el despegue, y la misión entera adentro para volver a importarla tal cual.
+ *
+ * `ground`: el suelo (TerrainFollow.reference) para poner las alturas sobre el nivel del mar; sin
+ * él van sobre el suelo, que es exacto para lo que sigue el terreno y aproximado para lo demás.
+ */
+export function exportKml(plan, ground = null) {
+  const result = PlanPlanner.plan(plan);
+  const base = ground ? ground.takeoffGround : 0;
+  const mode = ground ? "absolute" : "relativeToGround";
+  const needed = TerrainFollow.needed(plan);
+  const placemarks = { route: [], areas: [], points: [] };
+  const placemark = (folder, name, style, geometry) =>
+    placemarks[folder].push(`<Placemark><name>${xmlEscape(name)}</name><styleUrl>#${style}</styleUrl>${geometry}</Placemark>`);
+  const line = (points, extrude = true) =>
+    `<LineString><extrude>${extrude ? 1 : 0}</extrude><tessellate>0</tessellate><altitudeMode>${mode}</altitudeMode><coordinates>${kmlCoords(points)}</coordinates></LineString>`;
+
+  // La ruta de cada componente, con la altura de cada punto.
+  let previous = null;
+  for (const item of result.items) {
+    const { component, result: route } = item;
+    if (!component.enabled || !route) continue;
+    let points;
+    if (ground && TerrainFollow.follows(component)) {
+      points = TerrainFollow.alongRoute(ground, route.path, TerrainFollow.aglAlong(component, route.path)).map((s) => ({ position: s.position, altitude: base + s.altitude }));
+    } else {
+      const altitudes = routeAltitudes(component, route.path);
+      points = route.path.map((position, i) => ({ position, altitude: base + altitudes[i] }));
+    }
+    const start = points[0];
+    const from = previous ?? { position: result.takeoff ?? start.position, altitude: base };
+    let cruise = Math.max(from.altitude, start.altitude);
+    if (ground && needed) cruise = Math.max(cruise, base + TerrainFollow.highestGround(ground, from.position, start.position) + TerrainFollow.TRANSIT_CLEARANCE);
+    const name = `${componentName(component)} ${item.number}`;
+    placemark("route", `Hacia ${name}`, "transit", line([from, { ...from, altitude: cruise }, { ...start, altitude: cruise }, start], false));
+    placemark("route", name, "route", line(points));
+    previous = points.at(-1);
+
+    // Lo que se dibujó en el mapa.
+    if (component.type === "map") {
+      placemark("areas", `${name} · área`, "area", `<Polygon><outerBoundaryIs><LinearRing><coordinates>${kmlCoords([...component.boundary, component.boundary[0]].map((position) => ({ position, altitude: 0 })))}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
+    } else if (component.type === "corridor") {
+      const outline = CorridorPlanner.outline(component);
+      const shape = outline.length ? [...outline, outline[0]] : component.path;
+      placemark("areas", `${name} · franja`, "area", outline.length ? `<Polygon><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(shape.map((position) => ({ position, altitude: 0 })))}</coordinates></LinearRing></outerBoundaryIs></Polygon>` : `<LineString><tessellate>1</tessellate><coordinates>${kmlCoords(shape.map((position) => ({ position, altitude: 0 })))}</coordinates></LineString>`);
+    } else if (component.type === "orbit") {
+      placemark("points", `${name} · centro`, "point", `<Point><coordinates>${kmlCoords([{ position: component.center, altitude: 0 }])}</coordinates></Point>`);
+    } else if (component.type === "waypoints") {
+      component.points.forEach((p, i) =>
+        placemark("points", `Punto ${i + 1} · ${num(p.altitude)} m`, "point", `<Point><coordinates>${kmlCoords([{ position: p.position, altitude: 0 }])}</coordinates></Point>`),
+      );
+    } else if (component.position) {
+      placemark("points", name, "point", `<Point><coordinates>${kmlCoords([{ position: component.position, altitude: 0 }])}</coordinates></Point>`);
+    }
+  }
+  if (result.home && previous && result.takeoff) {
+    const home = { position: result.takeoff, altitude: base };
+    placemark("route", "Regreso al despegue", "transit", line([previous, { ...home, altitude: previous.altitude }, home], false));
+  }
+  if (result.takeoff) placemark("points", "Despegue", "takeoff", `<Point><coordinates>${kmlCoords([{ position: result.takeoff, altitude: 0 }])}</coordinates></Point>`);
+
+  const folder = (title, items) => (items.length ? `<Folder><name>${title}</name>${items.join("")}</Folder>` : "");
+  const style = (id, body) => `<Style id="${id}">${body}</Style>`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<name>${xmlEscape(plan.name)}</name>
+<description>${xmlEscape(`Misión del Mini 4 Pro · ${summary(plan)}`)}</description>
+<ExtendedData><Data name="mini4pro"><value>${cdata(serializePlan(plan))}</value></Data></ExtendedData>
+${style("route", "<LineStyle><color>fff28f2b</color><width>3</width></LineStyle><PolyStyle><color>33f28f2b</color></PolyStyle>")}
+${style("transit", "<LineStyle><color>ccffffff</color><width>2</width></LineStyle>")}
+${style("area", "<LineStyle><color>ffffffff</color><width>2</width></LineStyle><PolyStyle><color>40f28f2b</color></PolyStyle>")}
+${style("point", "<IconStyle><scale>0.8</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle>")}
+${style("takeoff", "<IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle>")}
+${folder("Ruta", placemarks.route)}
+${folder("Áreas", placemarks.areas)}
+${folder("Puntos", placemarks.points)}
+</Document>
+</kml>
+`;
 }

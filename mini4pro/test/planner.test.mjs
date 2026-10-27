@@ -25,7 +25,9 @@ import {
   newWaypoint,
   newWaypointsComponent,
   normalizePlan,
-  parseKml,
+  importKml,
+  FlightPreview,
+  exportKml,
   planPoints,
   projection,
   serializePlan,
@@ -275,14 +277,100 @@ test("KML: lee el polígono y quita el punto repetido", () => {
 <Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>
   -65.8250,18.1810,0 -65.8240,18.1810,0 -65.8240,18.1820,0 -65.8250,18.1820,0 -65.8250,18.1810,0
 </coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>`;
-  const result = parseKml(kml);
+  const result = importKml(kml);
   assert.equal(result.name, "Finca");
-  assert.equal(result.points.length, 4);
-  assert.deepEqual(result.points[0], [18.181, -65.825]);
+  assert.equal(result.plan, null);
+  assert.equal(result.components.length, 1);
+  const [area] = result.components;
+  assert.equal(area.type, "map");
+  assert.equal(area.boundary.length, 4);
+  assert.deepEqual(area.boundary[0], [18.181, -65.825]);
 });
 
-test("KML sin área no sirve", () => {
-  assert.equal(parseKml("<kml><Placemark><Point><coordinates>-65.8,18.1</coordinates></Point></Placemark></kml>"), null);
+/** Lo mismo que KmlImportTest.kt: áreas, líneas y puntos de Google Earth. */
+export const GOOGLE_EARTH_KML = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Río &amp; finca</name>
+<Folder><name>Cosas</name>
+<Placemark><name>Finca</name><Polygon><outerBoundaryIs><LinearRing><coordinates>-65.8250,18.1810,0 -65.8240,18.1810,0 -65.8240,18.1825,0 -65.8250,18.1825,0 -65.8250,18.1810,0</coordinates></LinearRing></outerBoundaryIs>
+<innerBoundaryIs><LinearRing><coordinates>-65.8248,18.1812 -65.8246,18.1812 -65.8246,18.1814 -65.8248,18.1812</coordinates></LinearRing></innerBoundaryIs></Polygon></Placemark>
+<Placemark><name><![CDATA[Quebrada <norte>]]></name><LineString><tessellate>1</tessellate><coordinates>-65.8300,18.1900 -65.8290,18.1910 -65.8280,18.1915</coordinates></LineString></Placemark>
+<Placemark><name>A</name><Point><altitudeMode>relativeToGround</altitudeMode><coordinates>-65.8200,18.1800,45</coordinates></Point></Placemark>
+<Placemark><name>B</name><Point><altitudeMode>relativeToGround</altitudeMode><coordinates>-65.8190,18.1805,60</coordinates></Point></Placemark>
+</Folder></Document></kml>`;
+
+test("KML: cada polígono un mapa, cada línea un corredor y los puntos un recorrido", () => {
+  const { name, components } = importKml(GOOGLE_EARTH_KML);
+  assert.equal(name, "Río & finca");
+  assert.deepEqual(components.map((c) => c.type), ["map", "corridor", "waypoints"]);
+  const [area, river, route] = components;
+  assert.equal(area.name, "Finca");
+  // Solo el borde de afuera.
+  assert.equal(area.boundary.length, 4);
+  assert.equal(area.direction, 0);
+  assert.equal(river.name, "Quebrada <norte>");
+  assert.deepEqual(river.path, [[18.19, -65.83], [18.191, -65.829], [18.1915, -65.828]]);
+  // Alturas sobre el suelo: siguen el terreno.
+  assert.deepEqual(route.points.map((p) => p.altitude), [45, 60]);
+  assert.equal(route.terrainFollow, true);
+  // Un solo punto es el centro de una órbita.
+  const single = importKml("<kml><Placemark><name>Faro</name><Point><coordinates>-65.8,18.1</coordinates></Point></Placemark></kml>");
+  assert.equal(single.components[0].type, "orbit");
+  assert.deepEqual(single.components[0].center, [18.1, -65.8]);
+  assert.equal(single.components[0].name, "Faro");
+  assert.deepEqual(importKml("<kml><Document><name>Nada</name></Document></kml>").components, []);
+});
+
+/** Un template.kml de una misión de waypoints de DJI (WPML), como lo guarda DJI Fly. */
+export const DJI_WPML = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:wpml="http://www.dji.com/wpmz/1.0.2"><Document>
+<wpml:missionConfig><wpml:flyToWaylineMode>safely</wpml:flyToWaylineMode><wpml:globalTransitionalSpeed>6</wpml:globalTransitionalSpeed></wpml:missionConfig>
+<Folder><wpml:templateType>waypoint</wpml:templateType>
+<wpml:waylineCoordinateSysParam><wpml:coordinateMode>WGS84</wpml:coordinateMode><wpml:heightMode>relativeToStartPoint</wpml:heightMode></wpml:waylineCoordinateSysParam>
+<wpml:autoFlightSpeed>4.5</wpml:autoFlightSpeed><wpml:globalHeight>50</wpml:globalHeight>
+<Placemark><Point><coordinates>-65.8200,18.1800</coordinates></Point><wpml:index>1</wpml:index><wpml:useGlobalHeight>0</wpml:useGlobalHeight><wpml:height>70</wpml:height></Placemark>
+<Placemark><Point><coordinates>-65.8210,18.1790</coordinates></Point><wpml:index>0</wpml:index><wpml:useGlobalHeight>1</wpml:useGlobalHeight><wpml:height>35</wpml:height></Placemark>
+<Placemark><Point><coordinates>-65.8190,18.1810</coordinates></Point><wpml:index>2</wpml:index><wpml:useGlobalHeight>0</wpml:useGlobalHeight><wpml:ellipsoidHeight>80</wpml:ellipsoidHeight><wpml:height>40</wpml:height></Placemark>
+</Folder></Document></kml>`;
+
+test("KML: waypoints de DJI con su orden, su altura y su velocidad", () => {
+  const { components } = importKml(DJI_WPML);
+  assert.equal(components.length, 1);
+  const [route] = components;
+  assert.equal(route.type, "waypoints");
+  assert.deepEqual(route.points.map((p) => p.position), [[18.179, -65.821], [18.18, -65.82], [18.181, -65.819]]);
+  assert.deepEqual(route.points.map((p) => p.altitude), [50, 70, 40]);
+  assert.equal(route.speed, 4.5);
+  assert.equal(route.terrainFollow, false);
+  assert.equal(importKml(DJI_WPML.replace("relativeToStartPoint", "aboveGroundLevel")).components[0].terrainFollow, true);
+});
+
+test("KML: lo que exporta esta app se vuelve a importar igual", () => {
+  const plan = newPlan("Río & <finca> ]]>", [
+    map({ name: "Finca" }),
+    { ...newCorridorComponent([origin, geo(0, 200), geo(100, 260)]), terrainFollow: true },
+    newOrbitComponent(geo(300, 300)),
+    newWaypointsComponent([newWaypoint(geo(-50, 0), 30), newWaypoint(geo(-80, 40), 45)]),
+    newPhotoComponent(geo(0, -80)),
+  ]);
+  const kml = exportKml(plan);
+  const back = importKml(kml);
+  assert.equal(back.name, plan.name);
+  assert.deepEqual(back.plan, normalizePlan(JSON.parse(serializePlan(plan))));
+  // Para Google Earth: la ruta de cada componente, sus tránsitos, las áreas y los puntos.
+  assert.equal((kml.match(/<styleUrl>#route<\/styleUrl>/g) ?? []).length, 5);
+  assert.equal((kml.match(/<styleUrl>#transit<\/styleUrl>/g) ?? []).length, 6);
+  assert.equal((kml.match(/<Polygon>/g) ?? []).length, 2);
+  assert.ok(kml.includes("<altitudeMode>relativeToGround</altitudeMode>"));
+  assert.ok(kml.includes("<name>Despegue</name>"));
+  // Con el suelo, las alturas van sobre el nivel del mar: el corredor sigue la loma.
+  const withGround = exportKml(plan, TerrainFollow.reference(hill, hill.elevation(origin)));
+  assert.ok(withGround.includes("<altitudeMode>absolute</altitudeMode>"));
+  const river = withGround.match(/<name>Corredor 2<\/name>[\s\S]*?<coordinates>([^<]*)<\/coordinates>/)[1].trim().split(" ");
+  assert.ok(river.length > 40);
+  const heights = river.map((c) => Number(c.split(",")[2]));
+  // 30 m sobre un suelo que va de unos 101 m (lejos de la loma) a 140 m (en la cima).
+  assert.ok(Math.min(...heights) > 130 && Math.min(...heights) < 134, `${Math.min(...heights)}`);
+  assert.ok(Math.max(...heights) > 165 && Math.max(...heights) < 171, `${Math.max(...heights)}`);
 });
 
 test("un duplicado va al lado del original, no encima", () => {
@@ -591,4 +679,47 @@ test("terreno: qué componentes lo siguen y cómo se guarda", () => {
   assert.equal(bare.components[0].terrainFollow, false);
   assert.ok(!TerrainFollow.needed(bare));
   assert.ok(!TerrainFollow.needed(newPlan("x", [{ ...components[0], enabled: false }])));
+});
+
+// ---- Vista previa ----
+
+test("vista previa: el vuelo dura lo mismo que el estimado y pasa por cada componente", () => {
+  const plan = newPlan("Todo", [
+    map({ altitude: 40 }),
+    { ...newOrbitComponent(geo(300, 300)), finalAltitude: 60 },
+    newWaypointsComponent([newWaypoint(geo(-50, 0), 30), newWaypoint(geo(-80, 40), 45)]),
+    { ...newPanoComponent(geo(0, -80)), panoType: "sphere" },
+  ]);
+  const result = PlanPlanner.plan(plan);
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, result.durationSeconds, 1e-6);
+  // Empieza en el despegue, en tierra, y termina ahí (regresa a casa).
+  const start = FlightPreview.at(timeline, 0);
+  assert.deepEqual(start.position, result.takeoff);
+  assert.equal(start.altitude, 0);
+  const end = FlightPreview.at(timeline, timeline.duration);
+  near(Geo.distance(end.position, result.takeoff), 0, 0.01);
+  near(end.altitude, 0, 1e-9);
+  assert.equal(end.photos, result.photoCount);
+  // Pasa por cada componente en orden, a su altura.
+  const labels = [...new Set(timeline.segments.filter((s) => s.kind !== "transit").map((s) => s.label))];
+  assert.deepEqual(labels, ["1. Mapa", "2. Órbita", "3. Waypoints", "4. Panorama"]);
+  const inMap = timeline.segments.find((s) => s.label === "1. Mapa");
+  assert.equal(FlightPreview.at(timeline, (inMap.t0 + inMap.t1) / 2).altitude, 40);
+  const orbit = timeline.segments.filter((s) => s.label === "2. Órbita");
+  near(orbit.at(-1).to.altitude, 60, 1e-9);
+  // En la órbita mira al centro.
+  const mid = FlightPreview.at(timeline, (orbit[5].t0 + orbit[5].t1) / 2);
+  near(mid.heading, Geo.bearing(mid.position, geo(300, 300)), 1e-6);
+  // La panorámica da la vuelta quieta.
+  const pano = timeline.segments.find((s) => s.kind === "shot");
+  near(Geo.distance(FlightPreview.at(timeline, pano.t0).position, FlightPreview.at(timeline, pano.t1 - 0.01).position), 0, 1e-6);
+  assert.equal(pano.turn, 360);
+  // Las fotos nunca bajan.
+  let last = 0;
+  for (let t = 0; t <= timeline.duration; t += timeline.duration / 500) {
+    const state = FlightPreview.at(timeline, t);
+    assert.ok(state.photos >= last);
+    last = state.photos;
+  }
 });
