@@ -2,7 +2,7 @@
 // Correr con: node --test mini4pro/test/planner.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Geo, MapPlanner, MINI_4_PRO, OrbitPlanner, newMapMission, newOrbitMission, parseKml, projection } from "../planner.js";
+import { Geo, MapPlanner, MINI_4_PRO, MINI_4_PRO_12MP, OrbitPlanner, newMapMission, newOrbitMission, normalizeMission, parseKml, projection } from "../planner.js";
 
 const near = (actual, expected, tolerance, message) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${message ?? ""} esperado ${expected} ± ${tolerance}, salió ${actual}`);
@@ -56,6 +56,71 @@ test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () 
   }
   const jump = Geo.distance(normal.legs.at(-1).end, plan.legs[normal.legs.length].start);
   assert.ok(jump < 15, `salto entre pasadas ${jump}`);
+});
+
+test("en 12 MP el GSD es el doble", () => near(MapPlanner.gsd(MINI_4_PRO_12MP, 10), 0.36, 0.005));
+
+test("con el dron de lado, el lado corto de la foto queda entre líneas", () => {
+  const forward = MapPlanner.plan(map({ altitude: 30 }));
+  const left = MapPlanner.plan(map({ altitude: 30, heading: "left" }));
+  near(forward.lineSpacing, 12.92, 0.05);
+  near(left.lineSpacing, 9.7, 0.05);
+  near(left.photoSpacing, 10.77, 0.05, "y el lado largo a lo largo de la línea");
+});
+
+test("espaciado por distancia usa los metros indicados", () => {
+  const plan = MapPlanner.plan(map({ spacing: "distance", sideDistance: 20, frontDistance: 15 }));
+  near(plan.lineSpacing, 20, 0.001);
+  near(plan.photoSpacing, 15, 0.001);
+  assert.equal(plan.legs.length, 5);
+});
+
+test("el inicio elige la esquina más cercana", () => {
+  const northEast = pr.toGeo({ x: 100, y: 100 });
+  const plan = MapPlanner.plan(map({ altitude: 30, start: northEast }));
+  assert.ok(Geo.distance(plan.path[0], northEast) < 15, `empieza a ${Geo.distance(plan.path[0], northEast)} m`);
+});
+
+test("en video no hay fotos y vuela a la velocidad máxima", () => {
+  const plan = MapPlanner.plan(map({ altitude: 10, captureMode: "video", maxSpeed: 8 }));
+  assert.equal(plan.photoCount, 0);
+  near(plan.speed, 8, 0.001);
+});
+
+test("prioridad por tiempo alarga cada línea para tomar velocidad", () => {
+  const distance = MapPlanner.plan(map({ altitude: 30 }));
+  const time = MapPlanner.plan(map({ altitude: 30, capturePriority: "time" }));
+  const runUp = Math.max(3, time.speed * 2);
+  near(Geo.distance(time.legs[0].start, time.legs[0].end), Geo.distance(distance.legs[0].start, distance.legs[0].end) + 2 * runUp, 0.05);
+});
+
+test("AEB 3 guarda tres fotos por punto y frenar alarga el vuelo", () => {
+  const single = MapPlanner.plan(map({ altitude: 30 }));
+  const aeb = MapPlanner.plan(map({ altitude: 30, photoType: "aeb3" }));
+  assert.equal(aeb.photoCount, single.photoCount * 3);
+  const stopping = MapPlanner.plan(map({ altitude: 30, captureSpeed: 0 }));
+  assert.ok(stopping.durationSeconds > single.durationSeconds + single.positions);
+});
+
+test("la órbita empieza en el rumbo indicado", () => {
+  const plan = OrbitPlanner.plan({ ...newOrbitMission(), center: origin, radius: 30, startBearing: 90 });
+  const start = pr.toLocal(plan.start);
+  near(start.x, 30, 0.01);
+  near(start.y, 0, 0.01);
+});
+
+test("con punto de interés el gimbal apunta a él", () => {
+  near(OrbitPlanner.gimbalPitch({ ...newOrbitMission(), altitude: 30, radius: 30, poiAltitude: 0 }), -45, 0.01);
+  near(OrbitPlanner.gimbalPitch({ ...newOrbitMission(), gimbalPitch: -10 }), -10, 0.01);
+});
+
+test("órbitas del formato anterior: photoInterval null es sin fotos", () => {
+  const old = { version: 1, id: "a", type: "orbit", name: "x", center: origin, photoInterval: null };
+  assert.equal(normalizeMission(old).captureMode, "none");
+  const withPhotos = normalizeMission({ ...old, photoInterval: 2 });
+  assert.equal(withPhotos.captureMode, "photo");
+  assert.equal(withPhotos.photoInterval, 2);
+  assert.equal(normalizeMission({ ...old, heading: "raro" }).heading, "center");
 });
 
 test("la órbita empieza al sur y cierra el círculo", () => {

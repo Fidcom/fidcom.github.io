@@ -1,11 +1,31 @@
 // Planificador de misiones para el DJI Mini 4 Pro: la versión de PC del editor de la app Mini4Pro.
 // Las misiones se guardan en este navegador y, si hay token, en GitHub para que las lea el teléfono.
 import {
+  CAPTURE_MODES,
+  CAPTURE_PRIORITIES,
+  COLOR_PROFILES,
+  EV_VALUES,
+  EXPOSURE_MODES,
   FINISH_ACTIONS,
+  FOCUS_MODES,
+  FRAME_RATES,
+  HEADING_REFERENCES,
+  ISO_VALUES,
+  MAP_HEADINGS,
   MAP_PATTERNS,
+  ORBIT_HEADINGS,
+  PHOTO_FORMATS,
+  PHOTO_RATIOS,
+  PHOTO_SIZES,
+  PHOTO_TYPES,
+  SHUTTER_VALUES,
+  SPACING_MODES,
+  VIDEO_RESOLUTIONS,
+  WHITE_BALANCES,
   Geo,
   MapPlanner,
   OrbitPlanner,
+  cameraFor,
   formatDuration,
   geometry,
   newMapMission,
@@ -142,7 +162,7 @@ function arrow(at, bearing) {
 }
 
 /** Dibuja una misión: el área en blanco, la ruta en azul y el inicio en verde, como en Dronelink. */
-function drawMission(mission, group, { faded = false, arrows = false, interactive = false } = {}) {
+function drawMission(mission, group, { faded = false, arrows = false, interactive = false, startLabel = !faded } = {}) {
   const layers = [];
   const routeStyle = { color: ACCENT, weight: faded ? 2.5 : 3, opacity: faded ? 0.75 : 1, lineJoin: "round", interactive };
   if (mission.type === "map") {
@@ -170,7 +190,7 @@ function drawMission(mission, group, { faded = false, arrows = false, interactiv
         }
       }
       layers.push(endMarker(plan.path.at(-1)));
-      layers.push(startMarker(plan.path[0], !faded));
+      layers.push(startMarker(plan.path[0], startLabel));
     }
   } else {
     const plan = OrbitPlanner.plan(mission);
@@ -353,7 +373,8 @@ function refresh() {
 /** Redibuja el área y la ruta, y actualiza el resumen y las ayudas. Sirve también mientras se arrastra. */
 function redrawShapes() {
   shapeLayer.clearLayers();
-  drawMission(current, shapeLayer, { arrows: true });
+  // En un mapa, la etiqueta de Inicio es la que se arrastra (drawAreaHandles).
+  drawMission(current, shapeLayer, { arrows: true, startLabel: current.type !== "map" });
   $("editor-summary").textContent = summary(current);
   renderStats();
   helpUpdaters.forEach((update) => update());
@@ -372,7 +393,9 @@ function renderStats() {
     const plan = MapPlanner.plan(current);
     stats = [
       ["Duración", plan.legs.length ? formatDuration(plan.durationSeconds) : "—"],
-      ["Fotos", plan.legs.length ? String(plan.photoCount) : "—"],
+      current.captureMode === "photo"
+        ? ["Fotos", plan.legs.length ? String(plan.photoCount) : "—"]
+        : ["Captura", current.captureMode === "video" ? "Video" : "Nada"],
       ["Distancia", plan.legs.length ? distanceText(plan.lengthMeters) : "—"],
       ["Área", plan.areaHectares ? `${num(plan.areaHectares, 2)} ha` : "—"],
       ["GSD", `${num(plan.gsdCmPerPx, 2)} cm/px`],
@@ -403,7 +426,7 @@ function updateHint() {
           : "Arrastra una esquina para moverla · clic en ella para quitarla · arrastra un punto pequeño para agregar otra";
   } else {
     hint.textContent = current.center
-      ? "Arrastra el centro para moverlo, o el cuadrito azul para cambiar el radio"
+      ? "Arrastra el centro para moverlo, o el cuadrito azul para cambiar el radio y dónde empieza"
       : "Haz clic en el mapa para poner el centro de la órbita";
   }
   hint.hidden = false;
@@ -476,12 +499,39 @@ function drawAreaHandles() {
     marker.on("contextmenu", removeVertex);
     handleLayer.addLayer(marker);
   });
+
+  // El punto de inicio se arrastra a otra esquina para empezar por ahí.
+  const plan = MapPlanner.plan(current);
+  if (plan.path.length && plan.legs.length <= MAX_LEGS) {
+    const start = L.marker(plan.path[0], {
+      // La etiqueta queda a la derecha del punto, para no tapar la esquina.
+      icon: L.divIcon({ className: "", html: '<div class="start-handle">Inicio</div>', iconSize: [64, 22], iconAnchor: [-12, 11] }),
+      draggable: true,
+      zIndexOffset: 1500,
+      title: "Arrastra a otra esquina para empezar por ahí",
+    });
+    start.on("dragstart", () => remember());
+    start.on("drag", () => {
+      current.start = toPoint(start.getLatLng());
+      redrawShapes();
+    });
+    start.on("dragend", () => {
+      save();
+      refresh();
+    });
+    handleLayer.addLayer(start);
+  }
 }
 
 function drawOrbitHandles() {
   const radiusPoint = () => OrbitPlanner.plan({ ...current, finalRadius: null, rotations: 1 }).start;
   const center = L.marker(current.center, { icon: divIcon("vertex-handle center", 18), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover el centro" });
-  const radius = L.marker(radiusPoint(), { icon: divIcon("radius-handle", 16), draggable: true, zIndexOffset: 1000, title: "Arrastra para cambiar el radio" });
+  const radius = L.marker(radiusPoint(), {
+    icon: divIcon("radius-handle", 16),
+    draggable: true,
+    zIndexOffset: 1000,
+    title: "Arrastra para cambiar el radio y dónde empieza",
+  });
 
   center.on("dragstart", () => remember());
   center.on("drag", () => {
@@ -496,8 +546,9 @@ function drawOrbitHandles() {
 
   radius.on("dragstart", () => remember());
   radius.on("drag", () => {
-    const meters = Geo.distance(current.center, toPoint(radius.getLatLng()));
-    current.radius = Math.min(500, Math.max(5, Math.round(meters)));
+    const point = toPoint(radius.getLatLng());
+    current.radius = Math.min(500, Math.max(5, Math.round(Geo.distance(current.center, point))));
+    current.startBearing = Math.round(Geo.bearing(current.center, point));
     fieldSetters.radius?.(current.radius);
     redrawShapes();
   });
@@ -522,11 +573,31 @@ const parse = (text) => {
 
 function buildParams() {
   const params = $("editor-params");
+  const scroll = params.scrollTop;
   params.replaceChildren();
   helpUpdaters.length = 0;
   for (const key of Object.keys(fieldSetters)) delete fieldSetters[key];
   if (current.type === "map") buildMapParams(params);
   else buildOrbitParams(params);
+  params.scrollTop = scroll;
+}
+
+/** Texto de ayuda suelto dentro de una sección. */
+function note(params, text) {
+  const el = document.createElement("div");
+  el.className = "section-note";
+  el.textContent = text;
+  params.append(el);
+}
+
+/** Guarda un cambio de un parámetro de opciones; con `rebuild`, redibuja el panel (cambian los campos visibles). */
+function setChoice(key, value, { rebuild = false, onChange } = {}) {
+  remember();
+  current[key] = value;
+  onChange?.(value);
+  save();
+  redrawShapes();
+  if (rebuild) buildParams();
 }
 
 function section(params, title) {
@@ -649,12 +720,18 @@ function numberParam(params, { key, label, unit = "", min, max, step = 1, decima
   return { show };
 }
 
-function choiceParam(params, { key, label, options }) {
+function choiceParam(params, { key, label, options, help, rebuild, onChange }) {
   const el = document.createElement("div");
   el.className = "param";
-  el.innerHTML = `<div class="label"></div><div class="segmented"></div>`;
+  el.innerHTML = `<div class="label"></div><div class="segmented"></div><div class="help"></div>`;
   el.querySelector(".label").textContent = label;
   const segmented = el.querySelector(".segmented");
+  const helpEl = el.querySelector(".help");
+  const showHelp = () => {
+    const text = help?.() ?? "";
+    helpEl.textContent = text;
+    helpEl.hidden = !text;
+  };
   const buttons = options.map(([value, text]) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -662,15 +739,67 @@ function choiceParam(params, { key, label, options }) {
     button.classList.toggle("selected", current[key] === value);
     button.addEventListener("click", () => {
       if (current[key] === value) return;
-      remember();
-      current[key] = value;
       buttons.forEach((b) => b.classList.toggle("selected", b === button));
-      save();
-      redrawShapes();
+      setChoice(key, value, { rebuild, onChange });
     });
     segmented.append(button);
     return button;
   });
+  helpUpdaters.push(showHelp);
+  showHelp();
+  params.append(el);
+}
+
+/** Una lista desplegable, para opciones largas. Con `unset`, la primera opción es "Sin cambiar" (null). */
+function selectParam(params, { key, label, options, unset = false, help, rebuild, onChange }) {
+  const el = document.createElement("div");
+  el.className = "param";
+  el.innerHTML = `
+    <div class="param-head">
+      <label></label>
+      <div class="select-box"><select></select></div>
+    </div>
+    <div class="help"></div>`;
+  const select = el.querySelector("select");
+  const helpEl = el.querySelector(".help");
+  select.id = `param-${key}`;
+  el.querySelector("label").textContent = label;
+  el.querySelector("label").htmlFor = select.id;
+  const all = unset ? [[null, "Sin cambiar"], ...options] : options;
+  all.forEach(([value, text], i) => {
+    const option = new Option(text, String(i));
+    option.selected = current[key] === value;
+    select.append(option);
+  });
+  el.querySelector(".select-box").classList.toggle("unset", current[key] === null);
+  select.addEventListener("change", () => {
+    const value = all[Number(select.value)][0];
+    el.querySelector(".select-box").classList.toggle("unset", value === null);
+    setChoice(key, value, { rebuild, onChange });
+  });
+  const showHelp = () => {
+    const text = help?.() ?? "";
+    helpEl.textContent = text;
+    helpEl.hidden = !text;
+  };
+  helpUpdaters.push(showHelp);
+  showHelp();
+  params.append(el);
+}
+
+/** Un interruptor de sí o no. */
+function toggleParam(params, { key, label, help }) {
+  const el = document.createElement("label");
+  el.className = "param toggle";
+  el.innerHTML = `
+    <span class="toggle-text"><span class="label"></span><span class="help"></span></span>
+    <input type="checkbox" role="switch" />`;
+  el.querySelector(".label").textContent = label;
+  el.querySelector(".help").textContent = help ?? "";
+  const input = el.querySelector("input");
+  input.id = `param-${key}`;
+  input.checked = Boolean(current[key]);
+  input.addEventListener("change", () => setChoice(key, input.checked));
   params.append(el);
 }
 
@@ -685,6 +814,8 @@ function buttonParam(params, label, onClick) {
 
 function buildMapParams(params) {
   const plan = () => MapPlanner.plan(current);
+  const photos = current.captureMode === "photo";
+  const byDistance = photos && current.capturePriority !== "time";
 
   section(params, "VUELO");
   numberParam(params, {
@@ -695,7 +826,7 @@ function buildMapParams(params) {
     max: 120,
     slider: true,
     help: () => {
-      const [w, h] = MapPlanner.footprint({ sensorWidthMm: 9.65, sensorHeightMm: 7.24, focalLengthMm: 6.72 }, current.altitude);
+      const [w, h] = MapPlanner.footprint(cameraFor(current), current.altitude);
       return `GSD ${num(plan().gsdCmPerPx, 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m`;
     },
   });
@@ -716,44 +847,101 @@ function buildMapParams(params) {
   });
   choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
 
-  section(params, "CÁMARA");
-  numberParam(params, {
-    key: "frontOverlap",
-    label: "Traslape frontal",
-    unit: "%",
-    min: 10,
-    max: 95,
-    slider: true,
-    help: () => `Una foto cada ${num(plan().photoSpacing, 1)} m`,
+  section(params, "CAPTURA");
+  choiceParam(params, { key: "captureMode", label: "Durante las líneas", options: CAPTURE_MODES, rebuild: true });
+  if (photos) {
+    choiceParam(params, {
+      key: "photoSize",
+      label: "Tamaño de foto",
+      options: PHOTO_SIZES,
+      help: () => (current.photoSize === "12mp" ? "Menos detalle, pero guarda cada foto en unos 2 s" : "Más detalle; guarda cada foto en unos 5 s"),
+    });
+    choiceParam(params, {
+      key: "capturePriority",
+      label: "Tomar las fotos por",
+      options: CAPTURE_PRIORITIES,
+      rebuild: true,
+      help: () =>
+        current.capturePriority === "time"
+          ? "Una foto cada cierto tiempo a velocidad fija; arranca antes del área para tomar velocidad"
+          : "La foto se toma al llegar a cada punto: traslape exacto aunque haya viento",
+    });
+    numberParam(params, {
+      key: "minPhotoInterval",
+      label: current.capturePriority === "time" ? "Foto cada" : "Tiempo mínimo entre fotos",
+      unit: "s",
+      min: 1,
+      max: 10,
+      step: 0.5,
+      decimals: 1,
+      help: () => "Lo más rápido que la cámara guarda cada foto",
+    });
+    if (byDistance) {
+      choiceParam(params, {
+        key: "photoType",
+        label: "Tipo de foto",
+        options: PHOTO_TYPES,
+        help: () => (current.photoType === "single" ? "" : "Varias fotos con distinta exposición en cada punto, para HDR"),
+      });
+      numberParam(params, {
+        key: "captureSpeed",
+        label: "Velocidad al tomar la foto",
+        unit: "km/h",
+        scale: KMH,
+        min: 0,
+        max: 54,
+        step: 0.5,
+        decimals: 1,
+        optional: true,
+        placeholder: "Sin frenar",
+        help: () =>
+          current.captureSpeed === null
+            ? "Déjalo vacío para no frenar; 0 = se detiene en cada foto"
+            : current.captureSpeed === 0
+              ? "Se detiene en cada foto: más nítidas, vuelo más largo"
+              : "Frena en cada foto: más nítidas, vuelo más largo",
+      });
+      toggleParam(params, { key: "verifyFileCreated", label: "Comprobar cada foto", help: "Si una foto no se guardó, la repite antes de seguir" });
+    }
+  }
+
+  section(params, "ESPACIADO");
+  choiceParam(params, {
+    key: "spacing",
+    label: "Separar por",
+    options: SPACING_MODES,
+    rebuild: true,
+    onChange: (value) => {
+      if (value !== "distance") return;
+      // Empieza con la separación que daba el traslape.
+      const before = MapPlanner.plan({ ...current, spacing: "overlap" });
+      current.frontDistance = Math.round(before.photoSpacing * 10) / 10;
+      current.sideDistance = Math.round(before.lineSpacing * 10) / 10;
+    },
   });
-  numberParam(params, {
-    key: "sideOverlap",
-    label: "Traslape lateral",
-    unit: "%",
-    min: 10,
-    max: 95,
-    slider: true,
-    help: () => `Líneas separadas ${num(plan().lineSpacing, 1)} m`,
-  });
-  numberParam(params, {
-    key: "minPhotoInterval",
-    label: "Tiempo mínimo entre fotos",
-    unit: "s",
-    min: 1,
-    max: 10,
-    step: 0.5,
-    decimals: 1,
-    help: () => "Lo más rápido que la cámara guarda cada foto",
-  });
-  numberParam(params, {
-    key: "gimbalPitch",
-    label: "Inclinación del gimbal",
-    unit: "°",
-    min: -90,
-    max: 0,
-    slider: true,
-    help: () => "-90° = mirando hacia abajo",
-  });
+  if (current.spacing === "distance") {
+    numberParam(params, { key: "frontDistance", label: "Entre fotos", unit: "m", min: 0.5, max: 200, step: 0.5, decimals: 1 });
+    numberParam(params, { key: "sideDistance", label: "Entre líneas", unit: "m", min: 1, max: 200, step: 0.5, decimals: 1 });
+  } else {
+    numberParam(params, {
+      key: "frontOverlap",
+      label: "Traslape frontal",
+      unit: "%",
+      min: 10,
+      max: 95,
+      slider: true,
+      help: () => `Una foto cada ${num(plan().photoSpacing, 1)} m`,
+    });
+    numberParam(params, {
+      key: "sideOverlap",
+      label: "Traslape lateral",
+      unit: "%",
+      min: 10,
+      max: 95,
+      slider: true,
+      help: () => `Líneas separadas ${num(plan().lineSpacing, 1)} m`,
+    });
+  }
 
   section(params, "CUADRÍCULA");
   choiceParam(params, { key: "pattern", label: "Patrón", options: MAP_PATTERNS });
@@ -779,6 +967,45 @@ function buildMapParams(params) {
     else setDirection(best);
   });
   buttonParam(params, "Girar 90°", () => setDirection((Math.round(current.direction) + 90) % 360));
+  note(params, "Para empezar por otra esquina, arrastra el punto verde de Inicio hasta ella.");
+
+  section(params, "RUMBO Y GIMBAL");
+  choiceParam(params, {
+    key: "heading",
+    label: "El dron mira",
+    options: MAP_HEADINGS,
+    rebuild: true,
+    help: () =>
+      ({
+        forward: "Hacia donde vuela; gira en cada línea",
+        left: "A la izquierda de la línea, sin girar entre líneas",
+        right: "A la derecha de la línea, sin girar entre líneas",
+        custom: "",
+      })[current.heading],
+  });
+  if (current.heading === "custom") {
+    numberParam(params, { key: "headingAngle", label: "Ángulo", unit: "°", min: 0, max: 359, slider: true });
+    choiceParam(params, {
+      key: "headingReference",
+      label: "Medido",
+      options: HEADING_REFERENCES,
+      help: () => (current.headingReference === "north" ? "Mismo rumbo en todas las líneas (0° = norte)" : "Gira con cada línea (0° = adelante)"),
+    });
+  }
+  numberParam(params, {
+    key: "gimbalPitch",
+    label: "Inclinación del gimbal",
+    unit: "°",
+    min: -90,
+    max: 0,
+    slider: true,
+    help: () => (current.gimbalPitch <= -89 ? "-90° = mirando hacia abajo" : "Fotos oblicuas, útiles para fachadas y modelos 3D"),
+  });
+
+  if (current.captureMode !== "none") cameraSettingsParams(params, { photo: photos });
+
+  section(params, "SEGURIDAD");
+  toggleParam(params, { key: "highWindTolerance", label: "Tolerancia a viento fuerte", help: "Corrige más fuerte cuando el viento lo saca de la línea" });
 }
 
 function buildOrbitParams(params) {
@@ -793,7 +1020,15 @@ function buildOrbitParams(params) {
       [false, "Antihorario"],
     ],
   });
-  numberParam(params, { key: "rotations", label: "Vueltas", min: 0.25, max: 10, step: 0.25, decimals: 2 });
+  numberParam(params, {
+    key: "rotations",
+    label: "Vueltas",
+    min: 0.05,
+    max: 10,
+    step: 0.05,
+    decimals: 2,
+    help: () => `Recorre ${num(current.rotations * 360)}° alrededor del centro`,
+  });
   numberParam(params, {
     key: "speed",
     label: "Velocidad",
@@ -806,12 +1041,30 @@ function buildOrbitParams(params) {
     help: () => `${num(OrbitPlanner.angularSpeed(current.radius, current.speed), 1)}° por segundo alrededor del centro`,
   });
   choiceParam(params, { key: "finishAction", label: "Al terminar", options: FINISH_ACTIONS });
+  note(params, "Arrastra el cuadrito azul para cambiar el radio y el punto donde empieza.");
 
   section(params, "ESPIRAL (OPCIONAL)");
   numberParam(params, { key: "finalAltitude", label: "Altura final", unit: "m", min: 5, max: 120, optional: true, placeholder: "Igual" });
   numberParam(params, { key: "finalRadius", label: "Radio final", unit: "m", min: 5, max: 500, optional: true, placeholder: "Igual" });
 
-  section(params, "CÁMARA");
+  section(params, "RUMBO Y GIMBAL");
+  selectParam(params, { key: "heading", label: "El dron mira", options: ORBIT_HEADINGS, rebuild: true });
+  if (current.heading === "custom") {
+    numberParam(params, { key: "headingAngle", label: "Rumbo", unit: "°", min: 0, max: 359, slider: true, help: () => "0° = norte · 90° = este" });
+  }
+  numberParam(params, {
+    key: "poiAltitude",
+    label: "Altura del objetivo",
+    unit: "m",
+    min: -50,
+    max: 120,
+    optional: true,
+    placeholder: "Sin objetivo",
+    help: () =>
+      current.poiAltitude === null
+        ? "Con un objetivo en el centro, el gimbal lo sigue solo"
+        : `El gimbal apunta al objetivo: ${num(OrbitPlanner.gimbalPitch(current))}°`,
+  });
   numberParam(params, {
     key: "gimbalPitch",
     label: "Inclinación del gimbal",
@@ -819,19 +1072,65 @@ function buildOrbitParams(params) {
     min: -90,
     max: 30,
     slider: true,
-    help: () => "0° = al horizonte · -90° = hacia abajo",
+    help: () => (current.poiAltitude === null ? "0° = al horizonte · -90° = hacia abajo" : "No se usa: el gimbal apunta al objetivo"),
   });
-  numberParam(params, {
-    key: "photoInterval",
-    label: "Foto cada",
-    unit: "s",
-    min: 1,
-    max: 60,
-    step: 0.5,
-    decimals: 1,
-    optional: true,
-    placeholder: "Sin fotos",
-    help: () => (current.photoInterval ? `Unas ${OrbitPlanner.plan(current)?.photoCount ?? 0} fotos` : "Déjalo vacío para no tomar fotos"),
+
+  section(params, "CAPTURA");
+  choiceParam(params, { key: "captureMode", label: "Durante la órbita", options: CAPTURE_MODES, rebuild: true });
+  if (current.captureMode === "photo") {
+    numberParam(params, {
+      key: "photoInterval",
+      label: "Foto cada",
+      unit: "s",
+      min: 1,
+      max: 60,
+      step: 0.5,
+      decimals: 1,
+      help: () => `Unas ${OrbitPlanner.plan(current)?.photoCount ?? 0} fotos`,
+    });
+    choiceParam(params, { key: "photoSize", label: "Tamaño de foto", options: PHOTO_SIZES });
+  }
+  if (current.captureMode !== "none") cameraSettingsParams(params, { photo: current.captureMode === "photo" });
+}
+
+/** Ajustes que la misión pone en la cámara al empezar. "Sin cambiar" deja lo que tenga la cámara. */
+function cameraSettingsParams(params, { photo }) {
+  section(params, "AJUSTES DE CÁMARA");
+  note(params, "“Sin cambiar” deja el ajuste que ya tenga la cámara.");
+  if (photo) {
+    selectParam(params, { key: "photoFormat", label: "Formato", options: PHOTO_FORMATS, unset: true });
+    selectParam(params, { key: "photoRatio", label: "Relación de aspecto", options: PHOTO_RATIOS, unset: true });
+  } else {
+    selectParam(params, { key: "videoResolution", label: "Resolución", options: VIDEO_RESOLUTIONS, unset: true });
+    selectParam(params, { key: "frameRate", label: "Cuadros por segundo", options: FRAME_RATES, unset: true });
+    selectParam(params, { key: "colorProfile", label: "Perfil de color", options: COLOR_PROFILES, unset: true });
+  }
+  selectParam(params, { key: "exposureMode", label: "Exposición", options: EXPOSURE_MODES, unset: true, rebuild: true });
+  if (current.exposureMode === "auto") {
+    selectParam(params, { key: "ev", label: "Compensación (EV)", options: EV_VALUES, unset: true });
+  } else if (current.exposureMode === "manual") {
+    selectParam(params, { key: "iso", label: "ISO", options: ISO_VALUES, unset: true });
+    selectParam(params, { key: "shutter", label: "Obturador", options: SHUTTER_VALUES, unset: true });
+  }
+  selectParam(params, {
+    key: "whiteBalance",
+    label: "Balance de blancos",
+    options: WHITE_BALANCES,
+    unset: true,
+    rebuild: true,
+    onChange: (value) => {
+      if (value === "custom" && current.whiteBalanceKelvin === null) current.whiteBalanceKelvin = 5500;
+    },
+  });
+  if (current.whiteBalance === "custom") {
+    numberParam(params, { key: "whiteBalanceKelvin", label: "Temperatura", unit: "K", min: 2000, max: 10000, step: 100, slider: true });
+  }
+  selectParam(params, {
+    key: "focusMode",
+    label: "Enfoque",
+    options: FOCUS_MODES,
+    unset: true,
+    help: () => (current.focusMode === "infinity" ? "Enfoque fijo al infinito: bueno para mapas a más de 10 m" : ""),
   });
 }
 
