@@ -598,6 +598,14 @@ button {
   width: 100%;
 }
 
+a.button {
+  text-decoration: none;
+}
+
+.ppk-link {
+  margin-top: 4px;
+}
+
 .icon-button {
   width: 36px;
   height: 36px;

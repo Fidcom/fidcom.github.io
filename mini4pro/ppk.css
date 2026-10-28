@@ -1,0 +1,182 @@
+/* La página PPK: lo que no está en styles.css del planificador. */
+
+.ppk-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--card);
+  border: 1px solid transparent;
+}
+
+.ppk-step.done {
+  border-color: rgba(61, 220, 132, 0.35);
+}
+
+.ppk-step.error {
+  border-color: rgba(255, 69, 58, 0.5);
+}
+
+.ppk-n {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.ppk-step.done .ppk-n {
+  background: rgba(61, 220, 132, 0.16);
+  color: var(--ok);
+}
+
+.ppk-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.ppk-step-title {
+  font-weight: 600;
+}
+
+.ppk-optional {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  margin-left: 4px;
+}
+
+.ppk-step-status {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.ppk-step.error .ppk-step-status {
+  color: #ffb4ae;
+}
+
+.ppk-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 0 4px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.ppk-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.ppk-field input {
+  font-variant-numeric: tabular-nums;
+}
+
+#offset-use {
+  margin-top: 8px;
+}
+
+.ppk-stats {
+  margin-top: 10px;
+}
+
+.ppk-stats .v.ok {
+  color: var(--ok);
+}
+
+.ppk-stats .v.warn {
+  color: var(--warn);
+}
+
+.ppk-warning {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.35);
+  color: #ffe08a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ppk-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ppk-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--card);
+  border: none;
+  text-align: left;
+  font-size: 12px;
+}
+
+.ppk-row:hover {
+  background: var(--card-hover);
+}
+
+.ppk-row .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.ppk-row .info {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ppk-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.ppk-dot.q1 {
+  background: var(--ok);
+}
+
+.ppk-dot.q2 {
+  background: var(--warn);
+}
+
+.ppk-footer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin: 0 -18px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--stroke);
+}
+
+.ppk-footer .button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.ppk-tooltip {
+  font: 12px/1.4 "Inter", system-ui, sans-serif;
+}
