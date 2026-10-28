@@ -11,7 +11,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="styles.css?v=20261029b" />
+    <link rel="stylesheet" href="styles.css?v=20261029c" />
   </head>
   <body>
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
@@ -45,6 +45,12 @@
       <symbol id="i-pano" viewBox="0 0 24 24"><path d="M20,6.54v10.91c-2.6,-0.77 -5.28,-1.16 -8,-1.16 -2.72,0 -5.4,0.39 -8,1.16V6.54c2.6,0.77 5.28,1.16 8,1.16 2.72,0.01 5.4,-0.38 8,-1.16M21.43,4c-0.1,0 -0.2,0.02 -0.31,0.06C18.18,5.16 15.09,5.7 12,5.7c-3.09,0 -6.18,-0.55 -9.12,-1.64C2.77,4.02 2.66,4 2.57,4c-0.34,0 -0.57,0.23 -0.57,0.63v14.75c0,0.39 0.23,0.62 0.57,0.62 0.1,0 0.2,-0.02 0.31,-0.06 2.94,-1.1 6.03,-1.64 9.12,-1.64 3.09,0 6.18,0.55 9.12,1.64 0.11,0.04 0.21,0.06 0.31,0.06 0.33,0 0.57,-0.23 0.57,-0.63V4.63c0,-0.4 -0.24,-0.63 -0.57,-0.63z" /></symbol>
       <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6,19h4V5H6v14zM14,5v14h4V5h-4z" /></symbol>
       <symbol id="i-play" viewBox="0 0 24 24"><path d="M8,5.14v13.72c0,0.79 0.87,1.27 1.54,0.84l10.78,-6.86c0.62,-0.39 0.62,-1.29 0,-1.68L9.54,4.3C8.87,3.87 8,4.35 8,5.14z" /></symbol>
+      <symbol id="i-commands" viewBox="0 0 24 24"><path d="M3,5.5l3.5,-2.2v4.4zM3,12l3.5,-2.2v4.4zM3,18.5l3.5,-2.2v4.4z" /><path d="M9.5,5.5H21M9.5,12H21M9.5,18.5H17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></symbol>
+      <symbol id="i-zone" viewBox="0 0 24 24"><path d="M12,3a9,9 0,1 1,0 18a9,9 0,1 1,0 -18zM5.8,5.8L18.2,18.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" /></symbol>
+      <symbol id="i-video" viewBox="0 0 24 24"><path d="M17,10.5V7c0,-0.55 -0.45,-1 -1,-1H4c-0.55,0 -1,0.45 -1,1v10c0,0.55 0.45,1 1,1h12c0.55,0 1,-0.45 1,-1v-3.5l4,4v-11l-4,4z" /></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><path d="M6,6h12v12H6z" /></symbol>
+      <symbol id="i-heading" viewBox="0 0 24 24"><path d="M12,2L20,21 12,16.5 4,21z" /></symbol>
+      <symbol id="i-altitude" viewBox="0 0 24 24"><path d="M12,2l-5,5h3.5v10H7l5,5 5,-5h-3.5V7H17z" /></symbol>
       <symbol id="i-move" viewBox="0 0 24 24"><path d="M10,9h4V6h3l-5,-5 -5,5h3v3zM9,10H6V7l-5,5 5,5v-3h3v-4zM23,12l-5,-5v3h-3v4h3v3l5,-5zM14,15h-4v3H7l5,5 5,-5h-3v-3z" /></symbol>
     </svg>
 
@@ -147,6 +153,7 @@
     </div>
 
     <div id="map-hint" class="map-hint" hidden></div>
+    <button id="zone-warning" class="zone-warning" type="button" hidden><svg><use href="#i-zone" /></svg><span></span></button>
 
     <!-- Vista previa del vuelo -->
     <div id="preview-bar" class="preview-bar" hidden>
@@ -215,6 +222,6 @@
     </dialog>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script type="module" src="app.js?v=20261029b"></script>
+    <script type="module" src="app.js?v=20261029c"></script>
   </body>
 </html>

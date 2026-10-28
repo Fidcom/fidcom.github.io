@@ -114,6 +114,23 @@ export const FACADE_PATTERNS = [
   ["horizontal", "Filas"],
 ];
 
+/** Lo que hace un comando: [clave, nombre, unidad de su número (null = no lleva), valor por defecto] (CommandType en Kotlin). */
+export const COMMAND_TYPES = [
+  ["wait", "Esperar", "s", 5],
+  ["photo", "Tomar foto", null, 0],
+  ["videoStart", "Empezar a grabar", null, 0],
+  ["videoStop", "Parar de grabar", null, 0],
+  ["gimbal", "Mover el gimbal", "°", -90],
+  ["heading", "Girar", "°", 0],
+  ["altitude", "Cambiar de altura", "m", 30],
+];
+
+/** Forma de una zona restringida. */
+export const ZONE_SHAPES = [
+  ["polygon", "Con esquinas"],
+  ["circle", "Redonda"],
+];
+
 export const PANO_TYPES = [
   ["sphere", "Esfera"],
   ["180", "180°"],
@@ -1005,7 +1022,37 @@ export const PointsPlanner = {
     const shots = PanoPlan.shots(c.panoType, c.heading, c.gimbalPitch).length;
     return { path: [c.position], altitudes: [c.altitude], lengthMeters: 0, durationSeconds: shots * PANO_SECONDS_PER_PHOTO, photoCount: shots };
   },
+
+  /** Comandos: en su punto o, sin punto, donde terminó lo anterior (`from`). */
+  commands(c, from = null) {
+    const position = c.position ?? from;
+    if (!position) return null;
+    let seconds = 0;
+    let photos = 0;
+    let altitude = c.altitude;
+    for (const command of c.commands) {
+      if (command.type === "wait") seconds += Math.max(0, command.value);
+      else if (command.type === "photo") {
+        seconds += PHOTO_SECONDS;
+        photos++;
+      } else if (command.type === "heading") seconds += TURN_SECONDS;
+      else if (command.type === "altitude") {
+        seconds += Math.abs(command.value - altitude) / VERTICAL_SPEED;
+        altitude = command.value;
+      }
+    }
+    return { path: [position], altitudes: [c.altitude], lengthMeters: 0, durationSeconds: seconds, photoCount: photos };
+  },
 };
+
+/** El modo en que empieza la cámara en unos comandos: el de la primera foto o grabación de la lista. */
+export function commandsCaptureMode(c) {
+  const first = c.commands.find((command) => command.type === "photo" || command.type === "videoStart");
+  return first?.type === "photo" ? "photo" : first?.type === "videoStart" ? "video" : "none";
+}
+
+/** Las alturas por las que pasan unos comandos: la de llegada y la de cada «Cambiar de altura». */
+export const commandAltitudes = (c) => [c.altitude, ...c.commands.filter((command) => command.type === "altitude").map((command) => command.value)];
 
 // ---- Planes (formato JSON v2, igual que MissionJson.kt) ----
 // Una misión es un plan con varios componentes en fila (mapas, órbitas, waypoints, fotos y
@@ -1234,6 +1281,51 @@ export function newFacadeComponent(face = "line", boundary = []) {
   };
 }
 
+/** Un comando de la lista, con el número que le toca a su tipo. */
+export function newCommand(type, value = null) {
+  return { type, value: value ?? COMMAND_TYPES.find(([key]) => key === type)?.[3] ?? 0 };
+}
+
+/**
+ * Comandos, como el componente "Commands" de Dronelink: el dron va a un punto (o se queda donde
+ * terminó lo anterior) y hace una lista en orden: esperar, fotos, grabar, gimbal, girar o altura.
+ */
+export function newCommandsComponent(position = null, commands = [newCommand("wait"), newCommand("photo")]) {
+  return {
+    id: componentId(),
+    type: "commands",
+    name: null,
+    enabled: true,
+    // null = donde terminó el componente anterior.
+    position,
+    // Altura al llegar, y el ángulo de la cámara hasta que un comando lo cambie.
+    altitude: 30,
+    gimbalPitch: -30,
+    commands,
+    photoSize: "48mp",
+    ...emptyCameraSettings(),
+  };
+}
+
+/**
+ * Zona restringida, como "Restriction Zone" en Dronelink: un área donde el dron no debe entrar, a
+ * todas las alturas o entre minAltitude y maxAltitude (null = sin límite). No se vuela: los
+ * tránsitos la rodean y la misión no se deja volar si una ruta entra.
+ */
+export function newZoneComponent(shape = "polygon", boundary = []) {
+  return {
+    id: componentId(),
+    type: "zone",
+    name: null,
+    enabled: true,
+    shape,
+    // Con esquinas: el contorno. Redonda: [centro, un punto del borde].
+    boundary,
+    minAltitude: null,
+    maxAltitude: null,
+  };
+}
+
 const NEW_COMPONENTS = {
   map: newMapComponent,
   corridor: newCorridorComponent,
@@ -1242,6 +1334,8 @@ const NEW_COMPONENTS = {
   photo: newPhotoComponent,
   pano: newPanoComponent,
   facade: newFacadeComponent,
+  commands: newCommandsComponent,
+  zone: newZoneComponent,
 };
 
 /** Si esta versión sabe editar y volar el componente (uno de una versión más nueva se guarda tal cual). */
@@ -1297,6 +1391,24 @@ export function normalizeComponent(json) {
     for (const key of ["distance", "speed", "horizontalDistance", "verticalDistance"]) if (!(component[key] > 0)) component[key] = base[key];
     component.gimbalPitch = finite(component.gimbalPitch, base.gimbalPitch);
   }
+  if (type === "commands") {
+    if (!isPoint(component.position)) component.position = null;
+    component.altitude = finite(component.altitude, base.altitude);
+    component.gimbalPitch = finite(component.gimbalPitch, base.gimbalPitch);
+    // Un comando de un tipo que esta versión no conoce se salta.
+    component.commands = (Array.isArray(json.commands) ? json.commands : [])
+      .filter((command) => command && COMMAND_TYPES.some(([key]) => key === command.type))
+      .map((command) => newCommand(command.type, optionalNumber(command.value)));
+    // Lo dice la lista; el teléfono lo escribe pero no lo lee.
+    delete component.captureMode;
+  }
+  if (type === "zone") {
+    component.boundary = (Array.isArray(json.boundary) ? json.boundary : []).filter(isPoint);
+    component.minAltitude = optionalNumber(component.minAltitude);
+    component.maxAltitude = optionalNumber(component.maxAltitude);
+    delete component.altitude;
+    delete component.captureMode;
+  }
   if (type === "photo" || type === "pano") {
     if (!isPoint(component.position)) component.position = null;
     component.heading = finite(component.heading, base.heading);
@@ -1321,6 +1433,7 @@ export function normalizeComponent(json) {
     panoType: PANO_TYPES,
   };
   if (type === "facade") Object.assign(choices, { face: FACADE_FACES, side: FACADE_SIDES, pattern: FACADE_PATTERNS });
+  if (type === "zone") choices.shape = ZONE_SHAPES;
   // En la foto y la panorámica el rumbo es un número.
   if (type === "map") choices.heading = MAP_HEADINGS;
   if (type === "orbit") choices.heading = ORBIT_HEADINGS;
@@ -1403,8 +1516,11 @@ export function copyComponent(component, gap = 10) {
     const to = pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + gap, y: 0 });
     const moved = Geo.translate(copy.points.map((p) => p.position), anchor, to);
     copy.points = copy.points.map((p, i) => ({ ...p, position: moved[i] }));
-  } else if (copy.type === "photo" || copy.type === "pano") {
+  } else if (copy.type === "photo" || copy.type === "pano" || copy.type === "commands") {
     copy.position = pr.toGeo({ x: gap, y: 0 });
+  } else if (copy.type === "zone") {
+    const xs = ZonePlanner.outline(copy).map((p) => pr.toLocal(p).x);
+    copy.boundary = Geo.translate(copy.boundary, anchor, pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + gap, y: 0 }));
   } else if (copy.type === "facade") {
     const xs = FacadePlanner.points(copy).map((p) => pr.toLocal(p).x);
     copy.boundary = Geo.translate(copy.boundary, anchor, pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + 2 * FacadePlanner.standoff(copy) + gap, y: 0 }));
@@ -1412,7 +1528,17 @@ export function copyComponent(component, gap = 10) {
   return copy;
 }
 
-const TYPE_NAMES = { map: "Mapa", corridor: "Corredor", orbit: "Órbita", waypoints: "Waypoints", photo: "Foto", pano: "Panorama", facade: "Fachada" };
+const TYPE_NAMES = {
+  map: "Mapa",
+  corridor: "Corredor",
+  orbit: "Órbita",
+  waypoints: "Waypoints",
+  photo: "Foto",
+  pano: "Panorama",
+  facade: "Fachada",
+  commands: "Comandos",
+  zone: "Zona restringida",
+};
 
 /** "Mapa", "Órbita"…: el nombre del tipo de componente. Alrededor de una estructura, la fachada es una inspección. */
 export const typeName = (component) =>
@@ -1433,10 +1559,14 @@ export function anchorOf(component) {
       return component.points[0]?.position ?? null;
     case "photo":
     case "pano":
+    case "commands":
       return component.position;
     case "facade":
       if (!component.boundary.length) return null;
       return component.face === "circle" ? component.boundary[0] : Geo.centroid(component.boundary);
+    case "zone":
+      if (!component.boundary.length) return null;
+      return component.shape === "circle" ? component.boundary[0] : Geo.centroid(component.boundary);
     default:
       return null;
   }
@@ -1450,7 +1580,8 @@ const POINT_TAKEOFF_METERS = 40;
 /** Despegue automático junto a un componente: al sur del área o de la órbita. */
 export function autoTakeoff(component) {
   const anchor = anchorOf(component);
-  if (!anchor) return null;
+  // Una zona no se vuela: no se despega junto a ella.
+  if (!anchor || component.type === "zone") return null;
   const pr = projection(anchor);
   if (component.type === "map" || component.type === "corridor") {
     const points = component.type === "map" ? component.boundary : componentPoints(component);
@@ -1497,6 +1628,8 @@ export function componentPlan(component, from = null) {
       return PointsPlanner.pano(component);
     case "facade":
       return FacadePlanner.plan(component, from);
+    case "commands":
+      return PointsPlanner.commands(component, from);
     default:
       return null;
   }
@@ -1512,7 +1645,27 @@ export function endAltitude(component) {
   if (component.type === "waypoints") return component.points.at(-1)?.altitude ?? component.altitude;
   // En columnas, termina arriba o abajo según cuántas columnas haya.
   if (component.type === "facade") return FacadePlanner.plan(component)?.stations.at(-1)?.altitude ?? component.altitude;
+  if (component.type === "commands") return commandAltitudes(component).at(-1);
+  if (component.type === "zone") return 0;
   return component.altitude;
+}
+
+/** Lo más alto del componente (de los waypoints, el punto más alto). */
+export function highestAltitude(component) {
+  if (component.type === "waypoints") return component.points.length ? Math.max(...component.points.map((p) => p.altitude)) : component.altitude;
+  if (component.type === "facade") return FacadePlanner.highest(component);
+  if (component.type === "commands") return Math.max(...commandAltitudes(component));
+  if (component.type === "zone") return 0;
+  return Math.max(component.altitude, endAltitude(component));
+}
+
+/** Lo más bajo del componente (de los waypoints, el punto más bajo). */
+export function lowestAltitude(component) {
+  if (component.type === "waypoints") return component.points.length ? Math.min(...component.points.map((p) => p.altitude)) : component.altitude;
+  if (component.type === "facade") return Math.min(component.altitude, component.finalAltitude);
+  if (component.type === "commands") return Math.min(...commandAltitudes(component));
+  if (component.type === "zone") return 0;
+  return Math.min(component.altitude, endAltitude(component));
 }
 
 export const PlanPlanner = {
@@ -1530,10 +1683,17 @@ export const PlanPlanner = {
     let durationSeconds = 0;
     let lengthMeters = 0;
     let photoCount = 0;
+    const zones = ZonePlanner.active(plan);
     const transit = (from, to, fromAltitude, toAltitude, kind) => {
-      const horizontal = Geo.distance(from, to);
+      // Rodea las zonas que alcanzan su altura de crucero; de regreso a casa, también las de más
+      // arriba (DJI puede subir a su altura de regreso).
+      const cruise = Math.max(fromAltitude, toAltitude);
+      const top = kind === "home" ? Infinity : cruise;
+      // via: los puntos por donde pasa para rodear zonas (vacío = derecho).
+      const via = ZonePlanner.detour(zones, from, to, cruise, top) ?? [];
+      const horizontal = Geo.pathLength([from, ...via, to]);
       const seconds = horizontal / plan.transitSpeed + Math.abs(toAltitude - fromAltitude) / VERTICAL_SPEED;
-      const t = { from, to, fromAltitude, toAltitude, kind, lengthMeters: horizontal, durationSeconds: seconds };
+      const t = { from, to, fromAltitude, toAltitude, kind, lengthMeters: horizontal, durationSeconds: seconds, via };
       transits.push(t);
       durationSeconds += seconds;
       lengthMeters += horizontal;
@@ -1582,12 +1742,296 @@ export function componentPoints(component) {
       return component.points.map((p) => p.position);
     case "photo":
     case "pano":
+    case "commands":
       return component.position ? [component.position] : [];
     case "facade":
       return FacadePlanner.points(component);
+    case "zone":
+      return ZonePlanner.outline(component);
     default:
       return [];
   }
+}
+
+/** Todo el camino de un tránsito: de `from` a `to` pasando por los puntos que rodean zonas. */
+export const transitPath = (t) => [t.from, ...(t.via ?? []), t.to];
+
+// ---- Zonas restringidas (Zones.kt) ----
+
+const norm = (v) => Math.sqrt(v.x * v.x + v.y * v.y);
+
+/** Cálculos de geometría plana para las zonas, iguales a ZoneGeometry en Kotlin. */
+const ZoneGeometry = {
+  /** Si `p` está dentro del polígono (sus puntos en orden, sin repetir el primero). */
+  inside(polygon, p) {
+    let inside = false;
+    for (let i = 0; i < polygon.length; i++) {
+      const a = polygon[i];
+      const b = polygon[(i + 1) % polygon.length];
+      if (a.y > p.y !== b.y > p.y && p.x < a.x + ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y)) inside = !inside;
+    }
+    return inside;
+  },
+
+  /** Distancia de `p` al tramo de `a` a `b`. */
+  segmentDistance(p, a, b) {
+    const d = sub(b, a);
+    const l = dotV(d, d);
+    const t = l === 0 ? 0 : Math.min(1, Math.max(0, dotV(sub(p, a), d) / l));
+    return norm(sub(add(a, scale(d, t)), p));
+  },
+
+  /** Si los tramos se cruzan de verdad (no solo se tocan). */
+  segmentsCross(p, q, a, b) {
+    const d1 = cross(sub(b, a), sub(p, a));
+    const d2 = cross(sub(b, a), sub(q, a));
+    const d3 = cross(sub(q, p), sub(a, p));
+    const d4 = cross(sub(q, p), sub(b, p));
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+  },
+
+  segmentsDistance(p, q, a, b) {
+    if (ZoneGeometry.segmentsCross(p, q, a, b)) return 0;
+    const sd = ZoneGeometry.segmentDistance;
+    return Math.min(Math.min(sd(p, a, b), sd(q, a, b)), Math.min(sd(a, p, q), sd(b, p, q)));
+  },
+};
+
+/** Una zona restringida en metros, alrededor del origen de una proyección (ZoneArea en Kotlin). */
+class ZoneArea {
+  constructor(zone, pr) {
+    this.zone = zone;
+    this.circle = zone.shape === "circle";
+    this.low = zone.minAltitude ?? -Infinity;
+    this.high = zone.maxAltitude ?? Infinity;
+    if (this.circle) {
+      this.center = pr.toLocal(zone.boundary[0]);
+      this.radius = norm(sub(pr.toLocal(zone.boundary[1]), this.center));
+      this.polygon = [];
+    } else {
+      this.center = { x: 0, y: 0 };
+      this.radius = 0;
+      this.polygon = zone.boundary.map(pr.toLocal);
+    }
+  }
+
+  /** Si la zona alcanza algo que vuela entre `bottom` y `top` m sobre el despegue. */
+  reaches(bottom, top) {
+    return bottom <= this.high && top >= this.low;
+  }
+
+  contains(p) {
+    return this.circle ? norm(sub(p, this.center)) < this.radius : ZoneGeometry.inside(this.polygon, p);
+  }
+
+  /** Si el tramo de `a` a `b` entra en la zona. */
+  crosses(a, b) {
+    if (this.circle) return ZoneGeometry.segmentDistance(this.center, a, b) < this.radius;
+    if (this.contains(a) || this.contains(b) || this.contains(scale(add(a, b), 0.5))) return true;
+    const n = this.polygon.length;
+    return this.polygon.some((_, i) => ZoneGeometry.segmentsCross(a, b, this.polygon[i], this.polygon[(i + 1) % n]));
+  }
+
+  /** Lo más cerca que pasa el tramo de `a` a `b` del borde de la zona (0 si entra). */
+  distance(a, b) {
+    if (this.crosses(a, b)) return 0;
+    if (this.circle) return ZoneGeometry.segmentDistance(this.center, a, b) - this.radius;
+    const n = this.polygon.length;
+    return Math.min(...this.polygon.map((_, i) => ZoneGeometry.segmentsDistance(a, b, this.polygon[i], this.polygon[(i + 1) % n])));
+  }
+
+  /** Puntos para rodear la zona a `margin` m del borde: en las esquinas que salen y alrededor del círculo. */
+  corners(margin) {
+    if (this.circle) {
+      const sides = ZonePlanner.CIRCLE_SIDES;
+      const reach = (this.radius + margin) / Math.cos(Math.PI / sides);
+      return Array.from({ length: sides }, (_, k) => {
+        const angle = (2 * Math.PI * k) / sides;
+        return add(this.center, scale({ x: Math.sin(angle), y: Math.cos(angle) }, reach));
+      });
+    }
+    const polygon = this.polygon;
+    const n = polygon.length;
+    let area = 0;
+    for (let i = 0; i < n; i++) area += cross(polygon[i], polygon[(i + 1) % n]);
+    const turnSign = area > 0 ? 1 : -1;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const v = polygon[i];
+      const d1 = sub(v, polygon[(i + n - 1) % n]);
+      const d2 = sub(polygon[(i + 1) % n], v);
+      if (norm(d1) < 1e-9 || norm(d2) < 1e-9) continue;
+      const e1 = scale(d1, 1 / norm(d1));
+      const e2 = scale(d2, 1 / norm(d2));
+      if (cross(e1, e2) * turnSign <= 1e-9) continue;
+      // Hacia afuera: a la derecha del borde si el contorno va contra reloj, a la izquierda si no.
+      const n1 = scale({ x: e1.y, y: -e1.x }, turnSign);
+      const n2 = scale({ x: e2.y, y: -e2.x }, turnSign);
+      const bisector = add(n1, n2);
+      const size = norm(bisector);
+      if (size * size >= 2) {
+        out.push(add(v, scale(bisector, (2 * margin) / (size * size))));
+      } else {
+        // Esquina muy aguda: dos puntos, uno pasado cada lado, para no alejarse de más.
+        out.push(add(add(v, scale(n1, margin)), scale(e1, margin)));
+        out.push(sub(add(v, scale(n2, margin)), scale(e2, margin)));
+      }
+    }
+    return out;
+  }
+}
+
+/** Zonas restringidas: el camino que las rodea y lo que de la misión entra en ellas (ZonePlanner en Kotlin). */
+export const ZonePlanner = {
+  /** Metros del borde de la zona por donde pasan los tránsitos que la rodean. */
+  MARGIN: 10,
+  /** Lados del polígono con que se rodea una zona redonda. */
+  CIRCLE_SIDES: 16,
+
+  hasShape: (zone) =>
+    zone.shape === "circle" ? zone.boundary.length >= 2 && Geo.distance(zone.boundary[0], zone.boundary[1]) >= 0.5 : zone.boundary.length >= 3,
+
+  /** Las zonas que cuentan: encendidas y ya marcadas. */
+  active: (plan) => plan.components.filter((c) => c.type === "zone" && c.enabled && ZonePlanner.hasShape(c)),
+
+  areas: (zones, pr) => zones.map((zone) => new ZoneArea(zone, pr)),
+
+  /** El borde para dibujarla: el contorno, o el círculo cada 5°. */
+  outline(zone) {
+    if (zone.shape !== "circle") return zone.boundary;
+    if (zone.boundary.length < 2) return zone.boundary.slice(0, 1);
+    const pr = projection(zone.boundary[0]);
+    const radius = norm(pr.toLocal(zone.boundary[1]));
+    return Array.from({ length: 72 }, (_, i) => {
+      const angle = (2 * Math.PI * i) / 72;
+      return pr.toGeo(scale({ x: Math.sin(angle), y: Math.cos(angle) }, radius));
+    });
+  },
+
+  /**
+   * Por dónde ir de `from` a `to` (en metros) sin entrar en las zonas que alcanzan alturas entre
+   * `bottom` y `top`: los puntos intermedios (vacío si se puede ir derecho), o null si no hay forma.
+   * Es el camino más corto por fuera, a MARGIN m de las esquinas.
+   */
+  route(areas, from, to, bottom, top) {
+    const blocking = areas.filter((area) => area.reaches(bottom, top));
+    if (!blocking.some((area) => area.crosses(from, to))) return [];
+    if (blocking.some((area) => area.contains(from) || area.contains(to))) return null;
+    const corners = blocking.flatMap((area) => area.corners(ZonePlanner.MARGIN)).filter((p) => !blocking.some((area) => area.contains(p)));
+    const nodes = [from, to, ...corners];
+    // Cada tramo pasa al menos a la mitad del margen de las zonas (o tan cerca como ya estén sus puntas).
+    const clearance = nodes.map((p) => Math.min(ZonePlanner.MARGIN / 2, Math.min(...blocking.map((area) => area.distance(p, p)))));
+    const open = (i, j) => {
+      const need = Math.min(clearance[i], clearance[j]) - 1e-6;
+      return blocking.every((area) => !area.crosses(nodes[i], nodes[j]) && area.distance(nodes[i], nodes[j]) >= need);
+    };
+    const count = nodes.length;
+    const best = new Array(count).fill(Infinity);
+    const previous = new Array(count).fill(-1);
+    const done = new Array(count).fill(false);
+    best[0] = 0;
+    for (;;) {
+      let u = -1;
+      for (let i = 0; i < count; i++) if (!done[i] && best[i] < Infinity && (u < 0 || best[i] < best[u])) u = i;
+      if (u < 0) return null;
+      if (u === 1) break;
+      done[u] = true;
+      for (let v = 0; v < count; v++) {
+        if (done[v]) continue;
+        const length = best[u] + norm(sub(nodes[v], nodes[u]));
+        if (length < best[v] && open(u, v)) {
+          best[v] = length;
+          previous[v] = u;
+        }
+      }
+    }
+    const via = [];
+    for (let at = previous[1]; at > 0; at = previous[at]) via.unshift(nodes[at]);
+    return via;
+  },
+
+  /** `route` con puntos geográficos. */
+  detour(zones, from, to, bottom, top) {
+    if (!zones.length) return [];
+    const pr = projection(from);
+    return ZonePlanner.route(ZonePlanner.areas(zones, pr), { x: 0, y: 0 }, pr.toLocal(to), bottom, top)?.map(pr.toGeo) ?? null;
+  },
+
+  /** Entre qué alturas vuela un componente; siguiendo el terreno puede ir a cualquiera. */
+  band: (component) => (TerrainFollow.follows(component) ? [-Infinity, Infinity] : [lowestAltitude(component), highestAltitude(component)]),
+
+  /**
+   * Lo que entra en alguna zona: el despegue, la ruta de un componente, un tránsito (que no pudo
+   * rodearla), el regreso a casa o el aterrizaje. {zone, message, at}, en el orden del vuelo.
+   */
+  violations(plan, result) {
+    const zones = ZonePlanner.active(plan);
+    const origin = result.takeoff;
+    if (!zones.length || !origin || result.flown === 0) return [];
+    const pr = projection(origin);
+    const out = [];
+    const home = { x: 0, y: 0 };
+    const flown = result.items.filter((item) => item.component.enabled && item.result);
+    for (const zone of zones) {
+      const area = new ZoneArea(zone, pr);
+      const zoneName = `«${componentName(zone)} ${plan.components.indexOf(zone) + 1}»`;
+      const push = (message, at) => out.push({ zone, message, at: pr.toGeo(at) });
+      const cruises = [flown[0].approach, result.home].filter(Boolean).map((t) => Math.max(t.fromAltitude, t.toAltitude));
+      if (area.contains(home) && area.reaches(0, cruises.length ? Math.max(...cruises) : 0)) push(`El despegue está dentro de ${zoneName}`, home);
+
+      for (const item of flown) {
+        const name = `${componentName(item.component)} ${item.number}`;
+        if (item.approach) {
+          const at = transitHit(area, item.approach, pr);
+          if (at) push(`El camino hacia ${name} entra en ${zoneName}`, at);
+        }
+        const [bottom, top] = ZonePlanner.band(item.component);
+        if (area.reaches(bottom, top)) {
+          const at = firstInside(area, item.result.path.map(pr.toLocal));
+          if (at) push(`La ruta de ${name} entra en ${zoneName}`, at);
+        }
+      }
+      if (result.home) {
+        const at = transitHit(area, result.home, pr);
+        if (at) push(`El regreso a casa entra en ${zoneName}`, at);
+      }
+      if (plan.finishAction === "LAND") {
+        const last = flown.at(-1);
+        const end = pr.toLocal(last.result.path.at(-1));
+        if (area.contains(end) && area.reaches(0, endAltitude(last.component))) push(`El aterrizaje está dentro de ${zoneName}`, end);
+      }
+    }
+    return out;
+  },
+};
+
+/**
+ * Dónde entra un tránsito en la zona: en su tramo recto a la altura de crucero (el regreso a casa
+ * puede ir más alto) o al subir o bajar en sus puntas. null si no entra.
+ */
+function transitHit(area, transit, pr) {
+  const cruise = Math.max(transit.fromAltitude, transit.toAltitude);
+  const top = transit.kind === "home" ? Infinity : cruise;
+  const points = transitPath(transit).map(pr.toLocal);
+  const from = points[0];
+  const to = points.at(-1);
+  if (area.contains(from) && area.reaches(transit.fromAltitude, top)) return from;
+  if (area.reaches(cruise, top)) {
+    for (let i = 1; i < points.length; i++) if (area.crosses(points[i - 1], points[i])) return points[i - 1];
+  }
+  if (transit.kind !== "home" && area.contains(to) && area.reaches(transit.toAltitude, cruise)) return to;
+  return null;
+}
+
+/** El primer punto de la ruta dentro de la zona, o el inicio del primer tramo que la cruza. */
+function firstInside(area, path) {
+  if (path.length === 1) return area.contains(path[0]) ? path[0] : null;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1];
+    const b = path[i];
+    if (area.crosses(a, b)) return area.contains(b) && !area.contains(a) ? b : a;
+  }
+  return null;
 }
 
 /** Todos los puntos del plan, con el despegue aunque sea automático, para encuadrarlo en el mapa. */
@@ -1825,6 +2269,29 @@ function componentDetails(component) {
     const pattern = FACADE_PATTERNS.find(([k]) => k === component.pattern)?.[1] ?? "";
     return `${altitude} · a ${num(component.distance)} m · ${pattern} · ${spacing}`;
   }
+  if (component.type === "commands") {
+    const n = component.commands.length;
+    const photos = component.commands.filter((command) => command.type === "photo").length;
+    return [
+      `${num(component.altitude)} m`,
+      component.position ? null : "donde terminó lo anterior",
+      n ? `${n} ${n === 1 ? "comando" : "comandos"}` : "sin comandos",
+      photos ? `${photos} ${photos === 1 ? "foto" : "fotos"}` : null,
+      component.commands.some((command) => command.type === "videoStart") ? "video" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (component.type === "zone") {
+    let size = "sin área";
+    if (ZonePlanner.hasShape(component)) {
+      size =
+        component.shape === "circle"
+          ? `radio ${num(Geo.distance(component.boundary[0], component.boundary[1]))} m`
+          : `${num(Geo.area(component.boundary) / 10000, 2)} ha`;
+    }
+    return [zoneHeights(component), size, component.enabled ? null : "no cuenta"].filter(Boolean).join(" · ");
+  }
   if (component.type === "map") {
     if (component.boundary.length < 3) return `${num(component.altitude)} m · sin área`;
     const area = Geo.area(component.boundary) / 10000;
@@ -1845,6 +2312,17 @@ function componentDetails(component) {
       ? `radio ${num(component.radius)} → ${num(component.finalRadius)} m`
       : `radio ${num(component.radius)} m`;
   return `${altitude} · ${num(component.rotations * 360)}° ${component.clockwise ? "horario" : "antihorario"} · ${radius}`;
+}
+
+/** "todas las alturas", "hasta 40 m", "desde 60 m" o "de 60 a 120 m". */
+export function zoneHeights(zone) {
+  const low = zone.minAltitude;
+  const high = zone.maxAltitude;
+  const trim = (value) => num(value, value % 1 ? 1 : 0);
+  if (low === null && high === null) return "todas las alturas";
+  if (low === null) return `hasta ${trim(high)} m`;
+  if (high === null) return `desde ${trim(low)} m`;
+  return `de ${trim(low)} a ${trim(high)} m`;
 }
 
 /** Resumen del plan para la lista: componentes, duración y fotos. */
@@ -1878,12 +2356,16 @@ export const FlightPreview = {
       segments.push({ t0: time, t1: time + seconds, from, to, ...info });
       time += seconds;
     };
-    // Como los tránsitos del piloto automático: sube donde está, va en línea recta y baja al llegar.
-    const transit = (from, to, label) => {
+    // Como los tránsitos del piloto automático: sube donde está, va en línea recta (rodeando las
+    // zonas restringidas por `via`) y baja al llegar.
+    const transit = (from, to, label, via = []) => {
       const cruise = Math.max(from.altitude, to.altitude);
       const info = { label, kind: "transit", photos: [photos, photos] };
       push(from, { ...from, altitude: cruise }, (cruise - from.altitude) / VERTICAL_SPEED, info);
-      push({ ...from, altitude: cruise }, { ...to, altitude: cruise }, Geo.distance(from.position, to.position) / plan.transitSpeed, info);
+      const path = [from.position, ...via, to.position];
+      for (let i = 1; i < path.length; i++) {
+        push({ position: path[i - 1], altitude: cruise }, { position: path[i], altitude: cruise }, Geo.distance(path[i - 1], path[i]) / plan.transitSpeed, info);
+      }
       push({ ...to, altitude: cruise }, to, (cruise - to.altitude) / VERTICAL_SPEED, info);
     };
 
@@ -1894,7 +2376,7 @@ export const FlightPreview = {
       if (!component.enabled || !route) continue;
       const label = `${item.number}. ${componentName(component)}`;
       const points = routePoints(component, route);
-      if (here) transit(here, points[0], `Hacia ${label}`);
+      if (here) transit(here, points[0], `Hacia ${label}`, item.approach?.via ?? []);
       const info = { label, kind: "route", component };
       if (component.type === "facade") {
         // De parada en parada, mirando a la cara, con la foto quieto en cada una.
@@ -1924,6 +2406,23 @@ export const FlightPreview = {
         // Las distancias en el mapa difieren en milímetros de las del plano: que sume lo estimado.
         const total = moves.reduce((sum, move) => sum + move[2], 0);
         for (const [from, to, seconds, details] of moves) push(from, to, (seconds * route.durationSeconds) / (total || 1), details);
+      } else if (component.type === "commands") {
+        // Uno tras otro, quieto en el punto: espera, fotos, giros y cambios de altura.
+        let at = points[0];
+        let taken = photos;
+        for (const command of component.commands) {
+          if (command.type === "wait") push(at, at, Math.max(0, command.value), { ...info, photos: [taken, taken] });
+          else if (command.type === "photo") {
+            push(at, at, PHOTO_SECONDS, { ...info, kind: "shot", photos: [taken, taken + 1] });
+            taken++;
+          } else if (command.type === "heading") push(at, at, TURN_SECONDS, { ...info, photos: [taken, taken], facing: command.value });
+          else if (command.type === "altitude") {
+            const to = { ...at, altitude: command.value };
+            push(at, to, Math.abs(command.value - at.altitude) / VERTICAL_SPEED, { ...info, photos: [taken, taken] });
+            at = to;
+          }
+        }
+        points[points.length - 1] = at;
       } else if (points.length === 1) {
         // Una foto o una panorámica: quieto en el punto (la panorámica da la vuelta).
         push(points[0], points[0], route.durationSeconds, { ...info, kind: "shot", photos: [photos, photos + route.photoCount] });
@@ -1945,7 +2444,10 @@ export const FlightPreview = {
     if (here && result.home) {
       const home = { position: result.takeoff, altitude: here.altitude };
       const info = { label: "Regreso al despegue", kind: "transit", photos: [photos, photos] };
-      push(here, home, Geo.distance(here.position, home.position) / plan.transitSpeed, info);
+      const path = transitPath(result.home);
+      for (let i = 1; i < path.length; i++) {
+        push({ position: path[i - 1], altitude: here.altitude }, { position: path[i], altitude: here.altitude }, Geo.distance(path[i - 1], path[i]) / plan.transitSpeed, info);
+      }
       push(home, { ...home, altitude: 0 }, home.altitude / VERTICAL_SPEED, { ...info, label: "Aterrizando" });
     } else if (here && result.landingSeconds > 0) {
       push(here, { ...here, altitude: 0 }, result.landingSeconds, { label: "Aterrizando", kind: "transit", photos: [photos, photos] });
@@ -2178,7 +2680,8 @@ export function exportKml(plan, ground = null) {
     let cruise = Math.max(from.altitude, start.altitude);
     if (ground && needed) cruise = Math.max(cruise, base + TerrainFollow.highestGround(ground, from.position, start.position) + TerrainFollow.TRANSIT_CLEARANCE);
     const name = `${componentName(component)} ${item.number}`;
-    placemark("route", `Hacia ${name}`, "transit", line([from, { ...from, altitude: cruise }, { ...start, altitude: cruise }, start], false));
+    const around = (item.approach?.via ?? []).map((position) => ({ position, altitude: cruise }));
+    placemark("route", `Hacia ${name}`, "transit", line([from, { ...from, altitude: cruise }, ...around, { ...start, altitude: cruise }, start], false));
     placemark("route", name, "route", line(points));
     previous = points.at(-1);
 
@@ -2204,8 +2707,16 @@ export function exportKml(plan, ground = null) {
   }
   if (result.home && previous && result.takeoff) {
     const home = { position: result.takeoff, altitude: base };
-    placemark("route", "Regreso al despegue", "transit", line([previous, { ...home, altitude: previous.altitude }, home], false));
+    const around = result.home.via.map((position) => ({ position, altitude: previous.altitude }));
+    placemark("route", "Regreso al despegue", "transit", line([previous, ...around, { ...home, altitude: previous.altitude }, home], false));
   }
+  // Las zonas restringidas, en rojo (no se vuelan).
+  plan.components.forEach((component, i) => {
+    if (component.type !== "zone" || !ZonePlanner.hasShape(component)) return;
+    const shape = ZonePlanner.outline(component).map((position) => ({ position, altitude: 0 }));
+    const name = `${componentName(component)} ${i + 1} · ${zoneHeights(component)}${component.enabled ? "" : " (no cuenta)"}`;
+    placemark("areas", name, "zone", `<Polygon><outerBoundaryIs><LinearRing><coordinates>${kmlCoords([...shape, shape[0]])}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
+  });
   if (result.takeoff) placemark("points", "Despegue", "takeoff", `<Point><coordinates>${kmlCoords([{ position: result.takeoff, altitude: 0 }])}</coordinates></Point>`);
 
   const folder = (title, items) => (items.length ? `<Folder><name>${title}</name>${items.join("")}</Folder>` : "");
@@ -2219,6 +2730,7 @@ export function exportKml(plan, ground = null) {
 ${style("route", "<LineStyle><color>fff28f2b</color><width>3</width></LineStyle><PolyStyle><color>33f28f2b</color></PolyStyle>")}
 ${style("transit", "<LineStyle><color>ccffffff</color><width>2</width></LineStyle>")}
 ${style("area", "<LineStyle><color>ffffffff</color><width>2</width></LineStyle><PolyStyle><color>40f28f2b</color></PolyStyle>")}
+${style("zone", "<LineStyle><color>ff3a45ff</color><width>2</width></LineStyle><PolyStyle><color>553a45ff</color></PolyStyle>")}
 ${style("point", "<IconStyle><scale>0.8</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle>")}
 ${style("takeoff", "<IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle>")}
 ${folder("Ruta", placemarks.route)}

@@ -1453,6 +1453,53 @@ button {
   pointer-events: none;
 }
 
+/* Algo de la misión entra en una zona restringida: arriba de la pista del mapa. */
+.zone-warning {
+  position: fixed;
+  bottom: 76px;
+  left: calc(50% + var(--panel-width) / 2);
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(640px, calc(100vw - var(--panel-width) - 48px));
+  padding: 9px 16px 9px 12px;
+  background: var(--danger);
+  color: #fff;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  text-align: left;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+
+.zone-warning[hidden],
+body.previewing .zone-warning {
+  display: none;
+}
+
+.zone-warning svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: currentColor;
+}
+
+.zone-warning span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zone-status {
+  color: var(--danger);
+  white-space: pre-line;
+}
+
 .toast {
   position: fixed;
   top: 68px;
@@ -1819,8 +1866,14 @@ button {
   }
 
   .map-hint,
+  .zone-warning,
   .toast {
     left: 50%;
+  }
+
+  .zone-warning {
+    bottom: calc(52vh + 68px);
+    max-width: 90vw;
   }
 
   .map-hint {

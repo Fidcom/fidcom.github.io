@@ -5,6 +5,7 @@ import {
   CAPTURE_MODES,
   CAPTURE_PRIORITIES,
   COLOR_PROFILES,
+  COMMAND_TYPES,
   EV_VALUES,
   EXPOSURE_MODES,
   FACADE_FACES,
@@ -29,6 +30,7 @@ import {
   VIDEO_RESOLUTIONS,
   WAYPOINT_ACTIONS,
   WHITE_BALANCES,
+  ZONE_SHAPES,
   CorridorPlanner,
   FacadePlanner,
   Geo,
@@ -38,8 +40,11 @@ import {
   OrbitPlanner,
   PanoPlan,
   PlanPlanner,
+  ZonePlanner,
   anchorOf,
   cameraFor,
+  commandAltitudes,
+  commandsCaptureMode,
   compass,
   componentName,
   componentSummary,
@@ -48,6 +53,8 @@ import {
   formatDuration,
   hasGeometry,
   isKnown,
+  newCommand,
+  newCommandsComponent,
   newCorridorComponent,
   newFacadeComponent,
   newMapComponent,
@@ -57,6 +64,7 @@ import {
   newPlan,
   newWaypoint,
   newWaypointsComponent,
+  newZoneComponent,
   normalizePlan,
   num,
   importKml as readKmlText,
@@ -68,12 +76,14 @@ import {
   startAltitude,
   summary,
   takeoffOf,
+  transitPath,
   typeName,
   waypointHeading,
+  zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261029b";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029b";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029b";
+} from "./planner.js?v=20261029c";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029c";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029c";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -82,6 +92,8 @@ const LABELS_KEY = "mini4pro.labels";
 const BASE_KEY = "mini4pro.baseLayer";
 const DEFAULT_VIEW = { center: [18.2, -66.45], zoom: 9 };
 const ACCENT = "#2f9bff";
+/** Las zonas restringidas y lo que entra en ellas. */
+const DANGER = "#ff453a";
 /** Más líneas que esto es un área demasiado grande para un vuelo; no se dibuja la ruta. */
 const MAX_LEGS = 400;
 /** Las velocidades se guardan en m/s y se muestran en km/h, como en Dronelink. */
@@ -135,6 +147,8 @@ let selectedId = null;
 let selectedPoint = null;
 /** Última ruta calculada del plan abierto (PlanPlanner.plan). */
 let planResult = null;
+/** Lo que de esa ruta entra en las zonas restringidas (ZonePlanner.violations). */
+let zoneViolations = [];
 let undoStack = [];
 let redoStack = [];
 const clone = (value) => structuredClone(value);
@@ -144,7 +158,27 @@ const rad = (d) => (d * Math.PI) / 180;
 
 const selected = () => current?.components.find((c) => c.id === selectedId) ?? null;
 const selectedItem = () => planResult?.items.find((item) => item.component.id === selectedId) ?? null;
-const TYPE_ICONS = { map: "grid", corridor: "corridor", orbit: "orbit", waypoints: "waypoints", photo: "camera", pano: "pano", facade: "facade" };
+const TYPE_ICONS = {
+  map: "grid",
+  corridor: "corridor",
+  orbit: "orbit",
+  waypoints: "waypoints",
+  photo: "camera",
+  pano: "pano",
+  facade: "facade",
+  commands: "commands",
+  zone: "zone",
+};
+const COMMAND_ICONS = { wait: "pause", photo: "camera", videoStart: "video", videoStop: "stop", gimbal: "down", heading: "heading", altitude: "altitude" };
+const COMMAND_DETAILS = {
+  wait: "Se queda quieto unos segundos",
+  photo: "Una foto hacia donde mira",
+  videoStart: "Empieza a grabar video",
+  videoStop: "Deja de grabar",
+  gimbal: "Sube o baja la cámara",
+  heading: "Gira el dron hacia un rumbo",
+  altitude: "Sube o baja sin moverse",
+};
 const typeIcon = (component) => (component.type === "facade" && component.face !== "line" ? "inspection" : TYPE_ICONS[component.type] ?? "plan");
 const isPointType = (component) => component?.type === "photo" || component?.type === "pano";
 
@@ -404,6 +438,14 @@ function drawComponent({ component, result }, { faded, dim, arrows, interactive,
         }
       }
     }
+  } else if (component.type === "zone") {
+    // En rojo, por debajo de todo; apagada, punteada.
+    const outline = ZonePlanner.outline(component);
+    const zone = { color: DANGER, weight: dim ? 1.5 : 2.5, opacity: faded || dim ? 0.7 : 1, dashArray: off ? "4 7" : null, interactive };
+    if (outline.length >= 3) layers.push(L.polygon(outline, { ...zone, fillColor: DANGER, fillOpacity: off ? 0.06 : faded || dim ? 0.14 : 0.24 }));
+    else if (outline.length === 2) layers.push(L.polyline(outline, zone));
+  } else if (component.type === "commands" && component.position) {
+    if (!editing) layers.push(dot(component.position, "#12b76a", interactive, off));
   } else if (isPointType(component) && component.position) {
     const span = component.type === "pano" ? PanoPlan.coverage(component.panoType) : LENS_DEGREES;
     // Más largo que el pin del componente, para que se vea por debajo de él.
@@ -420,18 +462,25 @@ function drawComponent({ component, result }, { faded, dim, arrows, interactive,
  */
 function drawPlan(plan, group, { faded = false, interactive = false, selectedId = null, editing = false, focusPoint = null, onSelect = null } = {}) {
   const result = PlanPlanner.plan(plan);
+  const isZone = (item) => item.component.type === "zone";
+  // Las zonas van debajo de los tránsitos, que pueden pasar rozándolas.
+  result.items.filter(isZone).forEach(drawItem);
   for (const t of result.transits) {
     group.addLayer(
-      L.polyline([t.from, t.to], {
+      L.polyline(transitPath(t), {
         color: "#ffffff",
         weight: faded ? 1.5 : 2,
         opacity: faded ? 0.55 : 0.9,
         dashArray: t.kind === "home" ? "6 6" : null,
+        lineJoin: "round",
         interactive: false,
       }),
     );
   }
-  for (const item of result.items) {
+  result.items.filter((item) => !isZone(item)).forEach(drawItem);
+  return result;
+
+  function drawItem(item) {
     const isSelected = item.component.id === selectedId;
     const dim = selectedId !== null && !isSelected;
     const clickable = interactive || (Boolean(onSelect) && !isSelected);
@@ -453,8 +502,10 @@ function drawPlan(plan, group, { faded = false, interactive = false, selectedId 
       group.addLayer(layer);
     }
     if (item.result && !faded && !(item.result.legs?.length > MAX_LEGS)) {
-      // El pin del componente abierto se arrastra: lo pone drawHandles.
-      if (!(editing && isSelected)) group.addLayer(startPin(item));
+      // El pin del componente abierto se arrastra: lo pone drawHandles. Unos comandos sin punto no
+      // tienen qué arrastrar: el pin dice dónde se hacen.
+      const floating = item.component.type === "commands" && !item.component.position;
+      if (!(editing && isSelected) || floating) group.addLayer(startPin(item));
       // Una órbita de vueltas completas termina donde empezó: basta con el pin.
       const closed = Geo.distance(item.result.path[0], item.result.path.at(-1)) < 5 && endAltitude(item.component) === startAltitude(item.component);
       // En los waypoints abiertos, el último punto ya dice su altura.
@@ -462,7 +513,6 @@ function drawPlan(plan, group, { faded = false, interactive = false, selectedId 
       if (!closed && !editingPoints) group.addLayer(endMarker(item));
     }
   }
-  return result;
 }
 
 // ---------- Lista ----------
@@ -581,6 +631,8 @@ function closeEditor() {
   $("list-view").hidden = false;
   $("edit-tools").hidden = true;
   $("map-hint").hidden = true;
+  $("zone-warning").hidden = true;
+  zoneViolations = [];
   history.replaceState(null, "", location.pathname);
   renderList();
 }
@@ -639,12 +691,33 @@ function refresh() {
 function redrawShapes() {
   shapeLayer.clearLayers();
   planResult = drawPlan(current, shapeLayer, { selectedId, editing: true, focusPoint: selectedPoint, onSelect: (id) => showView(id) });
+  zoneViolations = ZonePlanner.violations(current, planResult);
+  // Un anillo rojo donde la ruta entra en una zona.
+  for (const { at } of zoneViolations) shapeLayer.addLayer(L.circleMarker(at, { radius: 9, color: DANGER, weight: 3, fill: false, interactive: false }));
+  renderZoneWarning();
   renderStats();
   helpUpdaters.forEach((update) => update());
   $("tool-undo").disabled = undoStack.length === 0;
   $("tool-redo").disabled = redoStack.length === 0;
   const component = selected();
   $("tool-clear").disabled = !component || !anchorOf(component);
+}
+
+/**
+ * El aviso rojo sobre el mapa cuando algo de la misión entra en una zona restringida: así el
+ * teléfono no la deja volar. Al tocarlo se abre la zona, que dice todo lo que entra.
+ */
+function renderZoneWarning() {
+  const el = $("zone-warning");
+  const first = zoneViolations[0];
+  el.hidden = !first;
+  if (!first) return;
+  const more = zoneViolations.length - 1;
+  el.querySelector("span").textContent = first.message + (more > 0 ? `  ·  +${more}` : "");
+  el.title = `${zoneViolations.map((v) => `${v.message}.`).join("\n")}\nAsí no se deja volar: mueve la ruta o la zona, cambia sus alturas o apágala con el ojo.`;
+  el.onclick = () => {
+    if (selectedId !== first.zone.id) showView(first.zone.id);
+  };
 }
 
 function distanceText(meters) {
@@ -714,6 +787,23 @@ function renderStats() {
       ["Filas", result ? String(result.rows) : "—"],
       ["GSD", `${num(MapPlanner.gsd(cameraFor(component), component.distance), 2)} cm/px`],
     ];
+  } else if (component.type === "commands") {
+    stats = [
+      ["Duración", result ? formatDuration(result.durationSeconds) : "—"],
+      ["Comandos", String(component.commands.length)],
+      ["Fotos", result?.photoCount ? String(result.photoCount) : "—"],
+    ];
+  } else if (component.type === "zone") {
+    const shaped = ZonePlanner.hasShape(component);
+    const hits = zoneViolations.filter((v) => v.zone.id === component.id).length;
+    const heights = zoneHeights(component);
+    stats = [
+      ["Alturas", heights[0].toUpperCase() + heights.slice(1)],
+      component.shape === "circle"
+        ? ["Radio", shaped ? `${num(Geo.distance(component.boundary[0], component.boundary[1]))} m` : "—"]
+        : ["Área", shaped ? `${num(Geo.area(component.boundary) / 10000, 2)} ha` : "—"],
+      ["Entra", !component.enabled ? "No cuenta" : hits === 0 ? "Nada" : `${hits} ${hits === 1 ? "cosa" : "cosas"}`],
+    ];
   } else if (!isKnown(component)) {
     stats = [["Tipo", component.type]];
   } else {
@@ -732,7 +822,7 @@ function updateHint() {
   if (!component) {
     hint.textContent = current.components.length
       ? "Haz clic en un componente para editarlo · arrastra la H morada para mover el despegue"
-      : "Añade un componente a la misión: un mapa, un corredor, una órbita, waypoints, una foto, una panorámica o una fachada";
+      : "Añade un componente a la misión: un mapa, un corredor, una órbita, waypoints, una foto, una panorámica, una fachada o comandos";
   } else if (component.type === "map") {
     const n = component.boundary.length;
     hint.textContent =
@@ -774,6 +864,22 @@ function updateHint() {
         : "Arrastra el punto para moverlo o la flecha para cambiar hacia dónde mira la cámara";
   } else if (component.type === "facade") {
     hint.textContent = facadeHint(component);
+  } else if (component.type === "commands") {
+    hint.textContent = component.position
+      ? "Arrastra el punto para moverlo"
+      : "Sin punto, hace los comandos donde terminó el componente anterior · haz clic en el mapa para ponerle un punto";
+  } else if (component.type === "zone") {
+    const n = component.boundary.length;
+    hint.textContent =
+      component.shape === "circle"
+        ? n < 2
+          ? "Haz clic en el mapa en el centro de la zona"
+          : "Arrastra el centro para mover la zona o el cuadrito para cambiar su tamaño"
+        : n === 0
+          ? "Haz clic en el mapa en las esquinas de la zona donde el dron no debe entrar"
+          : n < 3
+            ? "Sigue marcando esquinas: hacen falta al menos 3"
+            : "Arrastra el centro para mover la zona · las esquinas para cambiarla · el + para agregar otra · clic en una esquina para quitarla";
   } else {
     hint.textContent = "Este componente es de una versión más nueva: aquí no se puede editar";
   }
@@ -813,8 +919,23 @@ map.on("click", (event) => {
   } else if (component.type === "facade") {
     if (component.face === "line") editGeometry(() => component.boundary.push(point));
     else if (component.face === "polygon") editGeometry(() => (component.boundary = Geo.insertIntoPolygon(component.boundary, point)));
-    // Redonda: empieza con 10 m de radio; el cuadrito lo cambia.
-    else if (component.boundary.length < 2) editGeometry(() => (component.boundary = [point, projection(point).toGeo({ x: 10, y: 0 }).map(round7)]));
+    // Redonda: empieza con 10 m de radio; el cuadrito lo cambia (y aparece en el panel).
+    else if (component.boundary.length < 2) {
+      editGeometry(() => (component.boundary = [point, projection(point).toGeo({ x: 10, y: 0 }).map(round7)]));
+      buildPanel();
+    }
+  } else if (component.type === "zone") {
+    if (component.shape === "polygon") editGeometry(() => (component.boundary = Geo.insertIntoPolygon(component.boundary, point)));
+    // Redonda: empieza con 15 m de radio.
+    else if (component.boundary.length < 2) {
+      editGeometry(() => (component.boundary = [point, projection(point).toGeo({ x: 15, y: 0 }).map(round7)]));
+      buildPanel();
+    }
+  } else if (component.type === "commands") {
+    if (!component.position) {
+      editGeometry(() => (component.position = point));
+      buildPanel();
+    }
   } else if (component.type === "waypoints") {
     insertWaypoint(component, selectedPoint !== null ? selectedPoint + 1 : component.points.length, point);
   } else if (isPointType(component) && !component.position) {
@@ -901,6 +1022,8 @@ function drawHandles() {
   else if (component?.type === "waypoints") drawWaypointHandles(component);
   else if (isPointType(component) && component.position) drawPointHandles(component);
   else if (component?.type === "facade") drawFacadeHandles(component);
+  else if (component?.type === "commands" && component.position) drawPointHandles(component);
+  else if (component?.type === "zone") drawZoneHandles(component);
 }
 
 /** La H morada: dónde despega el dron. Sin marcarla, va en el centro del primer componente. */
@@ -1081,15 +1204,45 @@ function drawCorridorHandles(component) {
   }
 }
 
-/**
- * La cara de una fachada. Un lado o con esquinas: sus puntos se arrastran y se quitan con clic, un
- * + mete otro en medio y el círculo del centro la mueve entera. Redonda: el centro la mueve y el
- * cuadrito cambia el radio.
- */
+/** La cara de una fachada: un lado, la planta con esquinas o la redonda. */
 function drawFacadeHandles(component) {
+  const closed = component.face === "polygon";
+  drawShapeHandles(component, {
+    circle: component.face === "circle",
+    closed,
+    complete: FacadePlanner.hasShape(component),
+    icon: "inspection",
+    what: component.face === "line" ? "la pared" : "la estructura",
+    radiusKey: "structureRadius",
+  });
+
+  // El pin de inicio: la columna más cerca de donde viene el dron.
+  const item = selectedItem();
+  if (item?.result) addHandle(startPin(item), () => selectedItem()?.result?.path[0]);
+}
+
+/** Una zona restringida: con esquinas o redonda. */
+function drawZoneHandles(component) {
+  drawShapeHandles(component, {
+    circle: component.shape === "circle",
+    closed: true,
+    complete: ZonePlanner.hasShape(component),
+    icon: "zone",
+    what: "la zona",
+    radiusKey: "zoneRadius",
+  });
+}
+
+/**
+ * Los puntos de una forma marcada en `component.boundary`. Una línea o con esquinas (`closed`): sus
+ * puntos se arrastran y se quitan con clic, un + mete otro en medio y el círculo del centro la
+ * mueve entera (ya `complete`). Redonda (`circle`, [centro, borde]): el centro la mueve y el
+ * cuadrito cambia el radio, que se ve en el campo `radiusKey` del panel. `what` es "la zona".
+ */
+function drawShapeHandles(component, { circle, closed, complete, icon, what, radiusKey }) {
   const roundPoint = ([lat, lon]) => [round7(lat), round7(lon)];
-  const moveHandle = (at, icon, title) => {
-    const marker = L.marker(at(), { icon, draggable: true, zIndexOffset: 1100, title });
+  const moveHandle = (at, markerIcon, title) => {
+    const marker = L.marker(at(), { icon: markerIcon, draggable: true, zIndexOffset: 1100, title });
     let from = null;
     let boundary = null;
     marker.on("dragstart", () => {
@@ -1100,70 +1253,62 @@ function drawFacadeHandles(component) {
     addHandle(marker, at);
   };
 
-  if (component.face === "circle") {
+  if (circle) {
     if (component.boundary.length < 2) return;
-    moveHandle(() => component.boundary[0], divIcon("orbit-center", 34, '<svg><use href="#i-inspection" /></svg>'), "Arrastra para mover la estructura");
+    moveHandle(() => component.boundary[0], divIcon("orbit-center", 34, `<svg><use href="#i-${icon}" /></svg>`), `Arrastra para mover ${what}`);
     const radius = L.marker(component.boundary[1], { icon: divIcon("radius-handle", 16), draggable: true, zIndexOffset: 1000, title: "Arrastra para cambiar el tamaño" });
     draggable(radius, (point) => {
       if (Geo.distance(component.boundary[0], point) < 1) return;
       component.boundary[1] = point;
-      fieldSetters.structureRadius?.(Math.round(Geo.distance(component.boundary[0], point) * 10) / 10);
+      fieldSetters[radiusKey]?.(Math.round(Geo.distance(component.boundary[0], point) * 10) / 10);
     });
     addHandle(radius, () => component.boundary[1]);
-  } else {
-    const closed = component.face === "polygon";
-    const count = component.boundary.length;
-    const midpointOf = (i) => {
-      const a = component.boundary[i];
-      const b = closed && component.boundary.length >= 3 ? component.boundary[(i + 1) % component.boundary.length] : component.boundary[i + 1];
-      return a && b ? [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] : null;
-    };
-    const edges = closed && count >= 3 ? count : count - 1;
-    for (let i = 0; i < edges; i++) {
-      const marker = L.marker(midpointOf(i), { icon: divIcon("mid-handle", 16, "+"), draggable: true, zIndexOffset: 500, title: "Arrastra o toca para agregar un punto" });
-      let inserted = -1;
-      marker.on("dragstart", () => {
-        remember();
-        inserted = i + 1;
-        component.boundary.splice(inserted, 0, toPoint(marker.getLatLng()));
-      });
-      marker.on("drag", () => {
-        component.boundary[inserted] = toPoint(marker.getLatLng());
-        redrawShapes();
-      });
-      marker.on("dragend", () => {
-        save();
-        refresh();
-      });
-      marker.on("click", (event) => {
-        L.DomEvent.stop(event);
-        editGeometry(() => component.boundary.splice(i + 1, 0, midpointOf(i)));
-      });
-      addHandle(marker, () => midpointOf(i));
-    }
-    component.boundary.forEach((point, i) => {
-      const marker = L.marker(point, { icon: divIcon("vertex-handle", 20), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
-      draggable(marker, (p) => (component.boundary[i] = p));
-      const removeVertex = (event) => {
-        L.DomEvent.stop(event);
-        editGeometry(() => component.boundary.splice(i, 1));
-      };
-      marker.on("click", removeVertex);
-      marker.on("contextmenu", removeVertex);
-      addHandle(marker, () => component.boundary[i]);
-    });
-    if (FacadePlanner.hasShape(component)) {
-      moveHandle(
-        () => Geo.centroid(component.boundary),
-        divIcon("move-handle", 32, '<svg><use href="#i-move" /></svg>'),
-        closed ? "Arrastra para mover toda la estructura" : "Arrastra para mover toda la pared",
-      );
-    }
+    return;
   }
 
-  // El pin de inicio: la columna más cerca de donde viene el dron.
-  const item = selectedItem();
-  if (item?.result) addHandle(startPin(item), () => selectedItem()?.result?.path[0]);
+  const count = component.boundary.length;
+  const midpointOf = (i) => {
+    const a = component.boundary[i];
+    const b = closed && component.boundary.length >= 3 ? component.boundary[(i + 1) % component.boundary.length] : component.boundary[i + 1];
+    return a && b ? [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] : null;
+  };
+  const edges = closed && count >= 3 ? count : count - 1;
+  for (let i = 0; i < edges; i++) {
+    const marker = L.marker(midpointOf(i), { icon: divIcon("mid-handle", 16, "+"), draggable: true, zIndexOffset: 500, title: "Arrastra o toca para agregar un punto" });
+    let inserted = -1;
+    marker.on("dragstart", () => {
+      remember();
+      inserted = i + 1;
+      component.boundary.splice(inserted, 0, toPoint(marker.getLatLng()));
+    });
+    marker.on("drag", () => {
+      component.boundary[inserted] = toPoint(marker.getLatLng());
+      redrawShapes();
+    });
+    marker.on("dragend", () => {
+      save();
+      refresh();
+    });
+    marker.on("click", (event) => {
+      L.DomEvent.stop(event);
+      editGeometry(() => component.boundary.splice(i + 1, 0, midpointOf(i)));
+    });
+    addHandle(marker, () => midpointOf(i));
+  }
+  component.boundary.forEach((point, i) => {
+    const marker = L.marker(point, { icon: divIcon("vertex-handle", 20), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
+    draggable(marker, (p) => (component.boundary[i] = p));
+    const removeVertex = (event) => {
+      L.DomEvent.stop(event);
+      editGeometry(() => component.boundary.splice(i, 1));
+    };
+    marker.on("click", removeVertex);
+    marker.on("contextmenu", removeVertex);
+    addHandle(marker, () => component.boundary[i]);
+  });
+  if (complete) {
+    moveHandle(() => Geo.centroid(component.boundary), divIcon("move-handle", 32, '<svg><use href="#i-move" /></svg>'), `Arrastra para mover toda ${what}`);
+  }
 }
 
 function drawOrbitHandles(component) {
@@ -1245,7 +1390,7 @@ function drawHeadingHandle(at, heading, onTurn) {
   addHandle(marker, tip);
 }
 
-/** El punto de una foto o una panorámica, y la flecha de hacia dónde mira (menos en la esfera). */
+/** El punto de una foto, una panorámica o unos comandos, y la flecha de hacia dónde mira la foto o la panorámica (no la esfera). */
 function drawPointHandles(component) {
   const center = L.marker(component.position, {
     icon: divIcon("orbit-center", 34, `<svg><use href="#i-${typeIcon(component)}" /></svg>`),
@@ -1255,7 +1400,7 @@ function drawPointHandles(component) {
   });
   draggable(center, (point) => (component.position = point));
   addHandle(center, () => component.position);
-  if (component.type === "pano" && component.panoType === "sphere") return;
+  if (component.type === "commands" || (component.type === "pano" && component.panoType === "sphere")) return;
   drawHeadingHandle(
     () => component.position,
     () => component.heading,
@@ -1412,6 +1557,8 @@ function buildPanel() {
     else if (component.type === "photo") buildPhotoParams(container, component);
     else if (component.type === "pano") buildPanoParams(container, component);
     else if (component.type === "facade") buildFacadeParams(container, component);
+    else if (component.type === "commands") buildCommandsParams(container, component);
+    else if (component.type === "zone") buildZoneParams(container, component);
     else buildUnknownParams(container, component);
   } else {
     $("plan-name").value = current.name;
@@ -1700,7 +1847,7 @@ function buildPlanBody(body) {
       <span class="body"><span class="name"></span><span class="meta"></span></span>
       <svg class="chevron"><use href="#i-chevron" /></svg>`;
     card.querySelector(".name").textContent = componentName(component);
-    card.querySelector(".meta").textContent = componentSummary(component) + (component.enabled ? "" : " · no se vuela");
+    card.querySelector(".meta").textContent = componentSummary(component) + (component.enabled || component.type === "zone" ? "" : " · no se vuela");
     card.addEventListener("click", () => showView(component.id));
     body.append(card);
   });
@@ -1721,6 +1868,8 @@ function buildPlanBody(body) {
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => addComponent(newPanoComponent())],
       ["facade", "Fachada", "Fotos frente a un lado de un edificio, por columnas o filas", () => addComponent(newFacadeComponent())],
       ["inspection", "Inspección", "Alrededor de una torre, un tanque o un edificio", () => addComponent(newFacadeComponent("polygon"))],
+      ["commands", "Comandos", "Esperar, fotos, video, gimbal, girar o cambiar de altura, en orden", () => addComponent(newCommandsComponent())],
+      ["zone", "Zona restringida", "Por donde el dron no debe pasar: los caminos la rodean", () => addComponent(newZoneComponent())],
       ["upload", "Desde un KML o KMZ", "Áreas, líneas o puntos de Google Earth, Dronelink o DJI", () => importKml("component")],
     ]);
   });
@@ -1778,10 +1927,13 @@ function renderEstimate(el) {
   for (const item of planResult.items) {
     if (!item.component.enabled || !item.result) continue;
     const name = `${item.number}. ${componentName(item.component)}`;
-    if (item.approach) row(item.approach.kind === "takeoff" ? `Despegue → ${name}` : `→ ${name}`, item.approach.durationSeconds, item.approach.lengthMeters, "transit");
+    if (item.approach) {
+      const around = item.approach.via.length ? " (rodea una zona)" : "";
+      row(`${item.approach.kind === "takeoff" ? "Despegue " : ""}→ ${name}${around}`, item.approach.durationSeconds, item.approach.lengthMeters, "transit");
+    }
     row(name, item.result.durationSeconds, item.result.lengthMeters);
   }
-  if (planResult.home) row("Regreso al despegue", planResult.home.durationSeconds, planResult.home.lengthMeters, "transit");
+  if (planResult.home) row(`Regreso al despegue${planResult.home.via.length ? " (rodea una zona)" : ""}`, planResult.home.durationSeconds, planResult.home.lengthMeters, "transit");
   if (planResult.landingSeconds) row("Aterrizaje", planResult.landingSeconds, 0, "transit");
   el.innerHTML = rows.length
     ? rows
@@ -1843,9 +1995,17 @@ function buildComponentHeader(component) {
   $("component-name").value = component.name ?? "";
   $("component-name").placeholder = componentName({ ...component, name: null });
   $("comp-enabled").querySelector("use").setAttribute("href", component.enabled ? "#i-eye" : "#i-eye-off");
-  $("comp-enabled").title = component.enabled ? "No volar este componente (se queda guardado)" : "Volver a volar este componente";
+  const zone = component.type === "zone";
+  $("comp-enabled").title = zone
+    ? component.enabled
+      ? "Dejar de usar esta zona (se queda guardada)"
+      : "Volver a usar esta zona"
+    : component.enabled
+      ? "No volar este componente (se queda guardado)"
+      : "Volver a volar este componente";
   $("comp-enabled").classList.toggle("active", !component.enabled);
   $("comp-off-note").hidden = component.enabled;
+  $("comp-off-note").textContent = zone ? "No cuenta" : "No se vuela";
   $("comp-up").disabled = index === 0;
   $("comp-down").disabled = index === current.components.length - 1;
 }
@@ -1885,7 +2045,7 @@ $("comp-duplicate").addEventListener("click", () => {
   toast(
     component.type === "waypoints"
       ? "Duplicado al lado"
-      : isPointType(component)
+      : isPointType(component) || component.type === "commands"
         ? "Duplicado al lado: arrastra su punto para moverlo"
         : "Duplicado al lado: arrastra su centro para moverlo",
   );
@@ -2447,6 +2607,183 @@ function facadeShape(boundary, from, to) {
     return [center.map(round7), far];
   }
   return boundary;
+}
+
+/** Cambia la lista de comandos de `c` (se puede deshacer) y vuelve a armar el panel. */
+function editCommands(c, change) {
+  remember();
+  change(c.commands);
+  save();
+  refresh();
+  buildPanel();
+}
+
+function buildCommandsParams(params, c) {
+  const photos = c.commands.some((command) => command.type === "photo");
+
+  section(params, "PUNTO");
+  if (!c.position) {
+    note(params, "Sin punto: hace los comandos donde terminó el componente anterior. Haz clic en el mapa para que vaya a un punto.");
+  } else {
+    buttonParam(params, "Hacerlos donde terminó lo anterior", () => {
+      editGeometry(() => (c.position = null));
+      buildPanel();
+    });
+  }
+  numberParam(params, c, {
+    key: "altitude",
+    label: "Altura al llegar",
+    unit: "m",
+    min: 2,
+    max: 120,
+    slider: true,
+    help: () => "Sobre el despegue. Llega a esta altura antes del primer comando",
+  });
+  numberParam(params, c, {
+    key: "gimbalPitch",
+    label: "Inclinación del gimbal al llegar",
+    unit: "°",
+    min: -90,
+    max: 30,
+    slider: true,
+    help: () => "Hasta que un comando «Mover el gimbal» la cambie · 0° = horizonte · -90° = hacia abajo",
+  });
+
+  section(params, "COMANDOS");
+  if (!c.commands.length) note(params, "Añade lo que hace el dron al llegar, en orden.");
+  c.commands.forEach((command, i) => {
+    const [, label] = COMMAND_TYPES.find(([key]) => key === command.type);
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `component-card${c.enabled ? "" : " off"}`;
+    card.innerHTML = `
+      <span class="component-icon"><svg><use href="#i-${COMMAND_ICONS[command.type]}" /></svg><span class="n">${i + 1}</span></span>
+      <span class="body"><span class="name"></span><span class="meta">Clic para subirlo, bajarlo o quitarlo</span></span>`;
+    card.querySelector(".name").textContent = label;
+    card.addEventListener("click", (event) => {
+      event.stopPropagation();
+      // Con el menú de otro comando abierto, se cierra ese y se abre este.
+      if ($("add-menu") && $("add-menu").previousElementSibling !== card) $("add-menu").remove();
+      const move = (to) => editCommands(c, (list) => list.splice(to, 0, ...list.splice(i, 1)));
+      toggleAddMenu(card, [
+        ...(i > 0 ? [["up", "Subir", "Lo hace antes", () => move(i - 1)]] : []),
+        ...(i < c.commands.length - 1 ? [["down", "Bajar", "Lo hace después", () => move(i + 1)]] : []),
+        ["delete", "Quitar", "Lo saca de la lista", () => editCommands(c, (list) => list.splice(i, 1))],
+      ]);
+    });
+    params.append(card);
+
+    const field = {
+      wait: { label: "Segundos", min: 0, max: 600, decimals: 1 },
+      gimbal: { label: "Inclinación", min: -90, max: 30, help: () => "0° = horizonte · -90° = hacia abajo" },
+      heading: { label: "Rumbo", min: 0, max: 359, help: () => `Mira al ${compass(command.value)} · 0° = norte · 90° = este` },
+      altitude: { label: "Altura", min: 2, max: 120, help: () => "Sube o baja sin moverse, sobre el despegue" },
+    }[command.type];
+    if (!field) return;
+    // Cada comando con su propia clave, para que los campos no se confundan entre sí.
+    const key = `command${i}`;
+    const holder = {
+      get [key]() {
+        return command.value;
+      },
+      set [key](value) {
+        command.value = value;
+      },
+    };
+    numberParam(params, holder, { key, unit: COMMAND_TYPES.find(([type]) => type === command.type)[2] ?? "", step: 1, ...field });
+  });
+  const add = buttonParam(params, "Añadir comando", (event) => {
+    event.stopPropagation();
+    toggleAddMenu(
+      add,
+      COMMAND_TYPES.map(([type, label]) => [
+        COMMAND_ICONS[type],
+        label,
+        COMMAND_DETAILS[type],
+        // Una altura nueva empieza en la que tiene en ese momento.
+        () => editCommands(c, (list) => list.push(newCommand(type, type === "altitude" ? commandAltitudes(c).at(-1) : null))),
+      ]),
+    );
+  });
+  add.insertAdjacentHTML("afterbegin", '<svg><use href="#i-add" /></svg>');
+  note(params, "Si no gira antes, la foto sale hacia donde llegó mirando. Para tomar una foto deja de grabar, y si al terminar los comandos sigue grabando, para.");
+
+  if (photos) {
+    section(params, "CAPTURA");
+    choiceParam(params, c, { key: "photoSize", label: "Tamaño de foto", options: PHOTO_SIZES });
+  }
+  if (commandsCaptureMode(c) !== "none") cameraSettingsParams(params, c, { photo: photos });
+}
+
+function buildZoneParams(params, c) {
+  const before = c.shape;
+  if (!c.enabled) note(params, "Esta zona está apagada: se queda en la misión pero no cuenta. Toca el ojo para volver a usarla.");
+
+  section(params, "ZONA");
+  note(
+    params,
+    `El dron no debe entrar aquí: los caminos entre componentes y el regreso a casa la rodean a ${ZonePlanner.MARGIN} m, y si la ruta de un componente entra, el teléfono no deja volar la misión.`,
+  );
+  choiceParam(params, c, {
+    key: "shape",
+    label: "Forma",
+    options: ZONE_SHAPES,
+    rebuild: true,
+    onChange: (shape) => (c.boundary = facadeShape(c.boundary, before, shape)),
+  });
+  if (c.shape === "circle" && c.boundary.length >= 2) {
+    // El radio no se guarda aparte: es la distancia del centro al segundo punto.
+    const size = {
+      get zoneRadius() {
+        return Math.round(Geo.distance(c.boundary[0], c.boundary[1]) * 10) / 10;
+      },
+      set zoneRadius(value) {
+        const b = rad(Geo.bearing(c.boundary[0], c.boundary[1]));
+        c.boundary[1] = projection(c.boundary[0]).toGeo({ x: value * Math.sin(b), y: value * Math.cos(b) }).map(round7);
+      },
+    };
+    numberParam(params, size, { key: "zoneRadius", label: "Radio", unit: "m", min: 1, max: 2000, step: 0.5, decimals: 1, handles: true });
+  }
+
+  section(params, "ALTURAS");
+  numberParam(params, c, {
+    key: "minAltitude",
+    label: "Desde",
+    unit: "m",
+    min: 0,
+    max: 500,
+    optional: true,
+    placeholder: "El suelo",
+    help: () => (c.minAltitude === null ? "Vacío: desde el suelo" : "Sobre el despegue; por debajo se puede pasar"),
+  });
+  numberParam(params, c, {
+    key: "maxAltitude",
+    label: "Hasta",
+    unit: "m",
+    min: 1,
+    max: 500,
+    optional: true,
+    placeholder: "Todas",
+    help: () =>
+      c.maxAltitude === null ? "Vacío: a todas las alturas, hay que rodearla" : "Sobre el despegue; por encima se puede pasar. Deja unos metros de más sobre lo más alto",
+  });
+
+  section(params, "LO QUE ENTRA");
+  const status = document.createElement("div");
+  status.className = "section-note";
+  params.append(status);
+  helpUpdaters.push(() => {
+    const hits = zoneViolations.filter((v) => v.zone.id === c.id);
+    status.textContent = !ZonePlanner.hasShape(c)
+      ? "Marca la zona en el mapa."
+      : !c.enabled
+        ? "Está apagada: no se revisa."
+        : hits.length
+          ? hits.map((v) => `• ${v.message}`).join("\n")
+          : "Nada de la misión entra en esta zona.";
+    status.classList.toggle("zone-status", hits.length > 0);
+  });
+  note(params, "Si el dron regresa a casa solo (batería baja o sin señal), va en línea recta y no rodea las zonas.");
 }
 
 function buildOrbitParams(params, c) {
@@ -3107,6 +3444,7 @@ $("new-more").addEventListener("click", (event) => {
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => newMission(newPanoComponent())],
       ["facade", "Fachada", "Fotos frente a un lado de un edificio, por columnas o filas", () => newMission(newFacadeComponent())],
       ["inspection", "Inspección", "Alrededor de una torre, un tanque o un edificio", () => newMission(newFacadeComponent("polygon"))],
+      ["commands", "Comandos", "Esperar, fotos, video, gimbal, girar o cambiar de altura, en orden", () => newMission(newCommandsComponent())],
     ],
     $("new-more").parentElement,
   );
@@ -3161,6 +3499,7 @@ function importedText(components) {
   add(count("corridor"), "corredor", "corredores");
   add(count("orbit"), "órbita", "órbitas");
   add(count("facade"), "fachada", "fachadas");
+  add(count("zone"), "zona restringida", "zonas restringidas");
   for (const c of components.filter((c) => c.type === "waypoints")) parts.push(`un recorrido de ${c.points.length} puntos`);
   return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}` : parts[0];
 }
@@ -3272,8 +3611,10 @@ $("tool-clear").addEventListener("click", () => {
       selectedPoint = null;
     } else if (isPointType(component)) {
       component.position = null;
-    } else if (component.type === "facade") {
+    } else if (component.type === "facade" || component.type === "zone") {
       component.boundary = [];
+    } else if (component.type === "commands") {
+      component.position = null;
     }
   });
   buildPanel();
