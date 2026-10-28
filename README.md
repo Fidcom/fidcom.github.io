@@ -34,4 +34,8 @@ En GitHub, revisa **Settings → Pages** y confirma que el source sea `Deploy fr
 app Mini4Pro. Se abre en `https://fidcom.github.io/mini4pro/`. Las misiones se sincronizan con la rama
 `misiones` del repositorio privado `Fidcom/mini4pro-app` usando un token que queda solo en el navegador.
 
-Pruebas: `node --test mini4pro/test/planner.test.mjs mini4pro/test/sync.test.mjs`
+`mini4pro/ppk.html` junta el registro de fotos de la app (Registros de vuelo > Compartir > Fotos para PPK) con el
+archivo `.pos` de un receptor GNSS (RTKLIB o Emlid Studio) y da la posición corregida de cada foto en CSV (Pix4D,
+Metashape) o `geo.txt` (WebODM). Todo se calcula en el navegador.
+
+Pruebas: `node --test mini4pro/test/planner.test.mjs mini4pro/test/sync.test.mjs mini4pro/test/ppk.test.mjs`
