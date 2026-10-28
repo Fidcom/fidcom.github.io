@@ -81,9 +81,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261029c";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029c";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029c";
+} from "./planner.js?v=20261029d";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029d";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029d";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -3557,14 +3557,22 @@ async function exportPlan(kmz) {
   toast(ground ? `Exportado ${link.download}` : `Exportado ${link.download} (sin datos del terreno: alturas sobre el suelo)`);
 }
 
-/** Un KMZ es un ZIP con el KML adentro (DJI lo guarda en wpmz/template.kml). */
+/**
+ * Un KMZ es un ZIP con el KML adentro (DJI lo guarda en wpmz/template.kml). Las rutas de DJI Fly
+ * (y las que exporta la app del teléfono) traen los puntos solo en waylines.wpml.
+ */
 async function readKml(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) return new TextDecoder().decode(bytes);
   const zip = await (await loadJsZip()).loadAsync(bytes);
-  const entries = Object.values(zip.files).filter((f) => f.name.toLowerCase().endsWith(".kml"));
-  const entry = entries.find((f) => /(^|\/)doc\.kml$/i.test(f.name)) ?? entries[0];
-  return entry ? entry.async("string") : null;
+  const files = Object.values(zip.files);
+  const entries = files.filter((f) => f.name.toLowerCase().endsWith(".kml"));
+  const doc = entries.find((f) => /(^|\/)doc\.kml$/i.test(f.name));
+  if (doc) return doc.async("string");
+  const found = entries[0] ? await entries[0].async("string") : null;
+  const waylines = files.find((f) => f.name.toLowerCase().endsWith(".wpml"));
+  if (!found?.includes("<Placemark") && waylines) return waylines.async("string");
+  return found;
 }
 
 $("plan-delete").addEventListener("click", () => {
