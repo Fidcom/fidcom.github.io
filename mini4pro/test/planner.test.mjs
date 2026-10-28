@@ -103,6 +103,39 @@ test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () 
   assert.ok(jump < 15, `salto entre pasadas ${jump}`);
 });
 
+test("el patrón oblicuo agrega cuatro pasadas inclinadas, corridas hacia atrás", () => {
+  const nadir = MapPlanner.plan(map({ altitude: 30 }));
+  const plan = MapPlanner.plan(map({ altitude: 30, pattern: "oblique", obliquePitch: -45 }));
+  // Primero la pasada vertical, igual que el patrón normal.
+  assert.deepEqual(plan.legs.slice(0, nadir.legs.length), nadir.legs);
+  const tilted = plan.legs.slice(nadir.legs.length);
+  assert.deepEqual([...new Set(tilted.map((leg) => leg.heading))], [0, 90, 180, 270]);
+  assert.ok(tilted.every((leg) => leg.gimbalPitch === -45));
+  // Mirando al norte, el dron vuela 30 m al sur del área (a 30 m de altura y 45°).
+  const north = tilted.filter((leg) => leg.heading === 0).flatMap((leg) => [pr.toLocal(leg.start), pr.toLocal(leg.end)]);
+  near(Math.min(...north.map((p) => p.y)), -30, 0.5);
+  near(Math.max(...north.map((p) => p.y)), 70, 0.5);
+  // Mirando al este, 30 m al oeste.
+  const east = tilted.filter((leg) => leg.heading === 90).flatMap((leg) => [pr.toLocal(leg.start), pr.toLocal(leg.end)]);
+  assert.ok(Math.min(...east.map((p) => p.x)) < -20);
+  assert.ok(Math.max(...east.map((p) => p.x)) < 80);
+  // De lejos la huella es más ancha: menos líneas que la vertical, y las fotos igual de seguidas.
+  assert.ok(tilted.filter((leg) => leg.heading === 0).length < nadir.legs.length);
+  near(plan.photoSpacing, nadir.photoSpacing, 1e-9);
+  assert.ok(plan.durationSeconds > nadir.durationSeconds * 3);
+  // Lo mismo que calcula el teléfono.
+  assert.equal(plan.legs.length, 36);
+  assert.equal(plan.positions, 468);
+  near(plan.lengthMeters, 4216.2, 0.5);
+});
+
+test("la inclinación oblicua queda entre -20° y -80°", () => {
+  assert.equal(MapPlanner.obliquePitch(map({ obliquePitch: -5 })), -20);
+  assert.equal(MapPlanner.obliquePitch(map({ obliquePitch: -90 })), -80);
+  near(MapPlanner.obliqueShift(30, -45), 30, 1e-9);
+  near(MapPlanner.obliqueShift(10, -60), 10 / Math.tan(Math.PI / 3), 1e-9);
+});
+
 test("en 12 MP el GSD es el doble", () => near(MapPlanner.gsd(MINI_4_PRO_12MP, 10), 0.36, 0.005));
 
 test("con el dron de lado, el lado corto de la foto queda entre líneas", () => {
