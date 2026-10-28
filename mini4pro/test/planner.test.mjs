@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CorridorPlanner,
+  FacadePlanner,
   Geo,
   MapPlanner,
   MINI_4_PRO,
@@ -17,6 +18,7 @@ import {
   endAltitude,
   isKnown,
   newCorridorComponent,
+  newFacadeComponent,
   newMapComponent,
   newOrbitComponent,
   newPanoComponent,
@@ -425,7 +427,7 @@ const pointsFixture = {
     },
     { id: "b", type: "photo", altitude: 20, position: [18.1808, -65.8188], heading: 180, gimbalPitch: -60, photoType: "aeb3" },
     { id: "c", type: "pano", altitude: 45, position: [18.1812, -65.8193], panoType: "wide", heading: 30, gimbalPitch: -20 },
-    { id: "d", type: "facade", name: "Futuro", altitude: 35, width: 40 },
+    { id: "d", type: "tower", name: "Futuro", altitude: 35, width: 40 },
   ],
 };
 
@@ -488,11 +490,11 @@ test("un componente de una versión más nueva se guarda tal cual y no se vuela"
   const future = plan.components[3];
   assert.equal(isKnown(future), false);
   assert.equal(componentName(future), "Futuro");
-  assert.equal(componentName({ ...future, name: undefined }), "Componente nuevo (facade)");
+  assert.equal(componentName({ ...future, name: undefined }), "Componente nuevo (tower)");
   future.name = "Río";
   future.enabled = false;
   const saved = JSON.parse(serializePlan(plan)).components[3];
-  assert.deepEqual(saved, { id: "d", type: "facade", name: "Río", altitude: 35, width: 40, enabled: false });
+  assert.deepEqual(saved, { id: "d", type: "tower", name: "Río", altitude: 35, width: 40, enabled: false });
 });
 
 test("waypoints, foto y panorámica: duplicar, despegue automático y encuadre", () => {
@@ -601,6 +603,209 @@ test("corredor: duplicar, despegue automático y encuadre", () => {
   assert.equal(componentPoints(corridor).length, 6);
   assert.deepEqual(componentPoints(newCorridorComponent([origin])), [origin]);
   assert.equal(componentName(corridor), "Corredor");
+});
+
+// ---- Fachada e inspección ----
+
+/** La misma misión que FacadeTest.kt: un lado visto desde el otro, una redonda y una con esquinas. */
+const facadeFixture = {
+  "version": 2,
+  "id": "facade-test",
+  "name": "Edificio",
+  "finishAction": "GO_HOME",
+  "takeoff": [
+    18.1798,
+    -65.8195
+  ],
+  "components": [
+    {
+      "id": "a",
+      "type": "facade",
+      "face": "line",
+      "boundary": [
+        [
+          18.18,
+          -65.82
+        ],
+        [
+          18.1803,
+          -65.8197
+        ],
+        [
+          18.1803,
+          -65.8193
+        ]
+      ],
+      "side": "left",
+      "distance": 12,
+      "altitude": 8,
+      "finalAltitude": 26,
+      "horizontalOverlap": 60,
+      "verticalOverlap": 55,
+      "gimbalPitch": -10,
+      "speed": 2.5,
+      "photoType": "aeb3"
+    },
+    {
+      "id": "b",
+      "type": "facade",
+      "face": "circle",
+      "boundary": [
+        [
+          18.181,
+          -65.8185
+        ],
+        [
+          18.181,
+          -65.81835
+        ]
+      ],
+      "distance": 6,
+      "altitude": 15,
+      "finalAltitude": 15,
+      "pattern": "horizontal",
+      "spacing": "distance",
+      "horizontalDistance": 4,
+      "verticalDistance": 3
+    },
+    {
+      "id": "c",
+      "type": "facade",
+      "face": "polygon",
+      "boundary": [
+        [
+          18.1815,
+          -65.8195
+        ],
+        [
+          18.1815,
+          -65.8188
+        ],
+        [
+          18.1822,
+          -65.819
+        ],
+        [
+          18.1818,
+          -65.8192
+        ],
+        [
+          18.1824,
+          -65.8196
+        ]
+      ],
+      "distance": 8,
+      "altitude": 10,
+      "finalAltitude": 30,
+      "pattern": "horizontal",
+      "captureMode": "video",
+      "photoSize": "12mp"
+    }
+  ]
+};
+
+test("fachada: las mismas paradas, tiempo y fotos que en el teléfono", () => {
+  const plan = normalizePlan(structuredClone(facadeFixture));
+  const result = PlanPlanner.plan(plan);
+  // Los números que da PlanPlanner.kt con esta misma misión.
+  near(result.durationSeconds, 2582.588255, 1e-5);
+  near(result.lengthMeters, 3484.38737, 1e-5);
+  assert.equal(result.photoCount, 265);
+  const [a, b, c] = result.items.map((item) => item.result);
+  assert.deepEqual([a.columns, a.rows, a.stations.length, a.photoCount], [16, 5, 80, 240]);
+  near(a.lengthMeters, 403.229577, 1e-5);
+  near(a.durationSeconds, 588.091831, 1e-5);
+  near(a.horizontalSpacing, 6.892857, 1e-6);
+  near(a.verticalSpacing, 5.817857, 1e-6);
+  near(a.standoff, 11.817693, 1e-6);
+  // Despega del otro lado de la pared: entra por el extremo oeste.
+  near(a.entry[0], 18.17992304, 1e-8);
+  near(a.entry[1], -65.82007696, 1e-8);
+  assert.deepEqual(a.path[0], a.entry);
+  near(a.stations[0].heading, 133.533606, 1e-5);
+  assert.deepEqual([b.columns, b.rows, b.photoCount], [25, 1, 25]);
+  near(b.durationSeconds, 166.845299, 1e-5);
+  near(b.path[0][0], 18.18087908, 1e-8);
+  near(b.path[0][1], -65.8186629, 1e-8);
+  assert.deepEqual([c.columns, c.rows, c.stations.length, c.photoCount], [76, 6, 456, 0]);
+  near(c.lengthMeters, 2538.952266, 1e-5);
+  near(c.durationSeconds, 1759.650755, 1e-5);
+  near(c.faceMeters, 383.880983, 1e-5);
+  near(c.stations[0].heading, 307.406542, 1e-5);
+  near(result.items[2].approach.durationSeconds, 9.840576, 1e-5);
+});
+
+test("fachada: columnas a la distancia, mirando a la pared, y filas parejas", () => {
+  const wall = {
+    ...newFacadeComponent("line", [geo(-20, 0), geo(20, 0)]),
+    spacing: "distance",
+    horizontalDistance: 5,
+    verticalDistance: 5,
+  };
+  const plan = FacadePlanner.plan(wall, geo(-30, 5));
+  assert.deepEqual([plan.columns, plan.rows, plan.stations.length], [9, 5, 45]);
+  assert.equal(plan.entry, null);
+  for (const s of plan.stations) {
+    near(pr.toLocal(s.position).y, 10, 0.05);
+    near(s.heading, 180, 0.01);
+  }
+  assert.deepEqual(plan.stations.slice(0, 6).map((s) => s.altitude), [10, 15, 20, 25, 30, 30]);
+  near(plan.lengthMeters, 220, 0.05);
+  near(plan.durationSeconds, 40 / 3 + 180 / 2 + 44 * 2 + 45 * 3, 0.05);
+  // Del otro lado: le da la vuelta por el extremo.
+  const around = FacadePlanner.plan(wall, geo(-5, -40));
+  near(pr.toLocal(around.entry).x, -30, 0.05);
+  assert.deepEqual(FacadePlanner.levels({ ...wall, altitude: 30, finalAltitude: 10 }, 6), [30, 25, 20, 15, 10]);
+  // Una pared de 20 km (marcada con el mapa muy alejado) no cabe en un vuelo.
+  assert.equal(FacadePlanner.plan({ ...wall, boundary: [geo(0, 0), geo(20000, 0)] }), null);
+  assert.equal(endAltitude(wall), 30);
+});
+
+test("fachada: se guarda y se lee igual, y lo que falta toma el valor por defecto", () => {
+  const tower = { ...newFacadeComponent("circle", [origin, geo(8, 0)]), distance: 12.5, finalAltitude: 5, pattern: "horizontal", photoType: "aeb3" };
+  const plan = newPlan("Torre", [tower]);
+  const text = serializePlan(plan);
+  assert.ok(!text.includes("null"));
+  assert.deepEqual(normalizePlan(JSON.parse(text)), plan);
+  const bare = normalizePlan({ id: "x", components: [{ id: "c", type: "facade", altitude: 18, boundary: [origin, [18.2, -65.8], "malo"], pattern: "grid" }] }).components[0];
+  assert.equal(bare.face, "line");
+  assert.equal(bare.finalAltitude, 18);
+  assert.equal(bare.distance, 10);
+  assert.equal(bare.pattern, "vertical");
+  assert.equal(bare.boundary.length, 2);
+  assert.equal(componentName(bare), "Fachada");
+  assert.equal(componentName({ ...bare, face: "polygon" }), "Inspección");
+});
+
+test("fachada: duplicar, despegue automático y encuadre", () => {
+  const wall = newFacadeComponent("line", [geo(0, 0), geo(40, 0)]);
+  // Mide 40 m: la copia queda 40 + 2 × 10 + 10 m al este.
+  near(pr.toLocal(copyComponent(wall).boundary[0]).x, 70, 0.5);
+  // El despegue automático va 20 m al sur de por donde vuela.
+  near(pr.toLocal(takeoffOf(newPlan("x", [wall]))).y, -30, 0.5);
+  const tank = newFacadeComponent("circle", [origin, geo(10, 0)]);
+  assert.equal(componentPoints(tank).length, 48);
+  near(pr.toLocal(takeoffOf(newPlan("x", [tank]))).y, -40, 0.5);
+});
+
+test("fachada: la vista previa sube y baja en cada columna y dura lo estimado", () => {
+  const plan = normalizePlan(structuredClone(facadeFixture));
+  const result = PlanPlanner.plan(plan);
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, result.durationSeconds, 1e-6);
+  const wall = timeline.segments.filter((s) => s.label === "1. Fachada");
+  const altitudes = wall.map((s) => s.to.altitude);
+  assert.equal(Math.min(...altitudes), 8);
+  assert.equal(Math.max(...altitudes), 26);
+  // En cada foto mira a la cara.
+  const shot = wall.find((s) => s.kind === "shot");
+  near(FlightPreview.at(timeline, (shot.t0 + shot.t1) / 2).heading, result.items[0].result.stations[0].heading, 1e-6);
+  const end = FlightPreview.at(timeline, timeline.duration);
+  assert.equal(end.photos, result.photoCount);
+  // Al exportar, la ruta lleva las alturas de las paradas y la pared va dibujada.
+  const kml = exportKml(plan);
+  assert.ok(kml.includes("1 · pared"));
+  assert.ok(kml.includes("Inspección 3 · estructura"));
 });
 
 // ---- Seguir el terreno: los mismos números que Terrain.kt ----
