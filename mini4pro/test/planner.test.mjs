@@ -12,11 +12,14 @@ import {
   OrbitPlanner,
   PanoPlan,
   PlanPlanner,
+  PointsPlanner,
   componentName,
   componentPoints,
   copyComponent,
   endAltitude,
   isKnown,
+  newCommand,
+  newCommandsComponent,
   newCorridorComponent,
   newFacadeComponent,
   newMapComponent,
@@ -26,7 +29,11 @@ import {
   newPlan,
   newWaypoint,
   newWaypointsComponent,
+  newZoneComponent,
   normalizePlan,
+  ZonePlanner,
+  commandsCaptureMode,
+  componentSummary,
   importKml,
   FlightPreview,
   exportKml,
@@ -806,6 +813,190 @@ test("fachada: la vista previa sube y baja en cada columna y dura lo estimado", 
   const kml = exportKml(plan);
   assert.ok(kml.includes("1 · pared"));
   assert.ok(kml.includes("Inspección 3 · estructura"));
+});
+
+// ---- Comandos y zonas restringidas: los mismos números que ZonesTest.kt ----
+
+/** La misión de ZonesTest.kt: cuatro zonas (con esquinas, redonda hasta 40 m, apagada y desde 70 m), una foto, comandos y waypoints. */
+const zonesFixture = {
+  "version": 2, "id": "zonas", "name": "Zonas", "finishAction": "GO_HOME", "transitSpeed": 8,
+  "takeoff": [18.1798, -65.8195],
+  "components": [
+    {"id": "z1", "type": "zone", "shape": "polygon",
+     "boundary": [[18.1803, -65.8199], [18.1803, -65.8189], [18.1806, -65.8189], [18.1806, -65.8193], [18.1810, -65.8193], [18.1810, -65.8199]]},
+    {"id": "p1", "type": "photo", "position": [18.1815, -65.8195], "altitude": 30, "heading": 0, "gimbalPitch": -30},
+    {"id": "z2", "type": "zone", "shape": "circle", "boundary": [[18.1815, -65.8183], [18.1815, -65.81815]], "maxAltitude": 40},
+    {"id": "c1", "type": "commands", "position": [18.1816, -65.8172], "altitude": 35, "gimbalPitch": -20,
+     "commands": [{"type": "wait", "value": 4}, {"type": "photo"}, {"type": "altitude", "value": 60}, {"type": "heading", "value": 200},
+                  {"type": "photo"}, {"type": "videoStart"}, {"type": "wait", "value": 3.5}, {"type": "videoStop"}]},
+    {"id": "z3", "type": "zone", "shape": "polygon", "enabled": false,
+     "boundary": [[18.1799, -65.8180], [18.1799, -65.8170], [18.1801, -65.8170]]},
+    {"id": "z4", "type": "zone", "shape": "polygon", "minAltitude": 70,
+     "boundary": [[18.1803, -65.8186], [18.1803, -65.8180], [18.1808, -65.8180], [18.1808, -65.8186]]},
+    {"id": "w1", "type": "waypoints", "altitude": 30, "speed": 5,
+     "points": [{"position": [18.1822, -65.8184], "altitude": 30}, {"position": [18.1812, -65.8181], "altitude": 30}]}
+  ]
+};
+
+const at = (x, y) => pr.toGeo({ x, y });
+/** Un cuadro de 60 × 40 m entre el despegue (0, 0) y el norte. */
+const block = (maxAltitude = null, minAltitude = null) => ({
+  ...newZoneComponent("polygon", [at(-30, 30), at(30, 30), at(30, 70), at(-30, 70)]),
+  maxAltitude,
+  minAltitude,
+});
+const photoAt = (x, y, altitude = 30) => ({ ...newPhotoComponent(at(x, y)), altitude });
+
+test("zonas: los mismos tránsitos, desvíos y avisos que en el teléfono", () => {
+  const plan = normalizePlan(structuredClone(zonesFixture));
+  const result = PlanPlanner.plan(plan);
+  assert.equal(result.flown, 3);
+  near(result.durationSeconds, 194.156033, 1e-5);
+  near(result.lengthMeters, 975.874268, 1e-5);
+  assert.equal(result.photoCount, 3);
+  near(result.items[3].result.durationSeconds, 25.833333, 1e-5);
+  assert.deepEqual(
+    result.transits.map((t) => t.via.length),
+    [2, 1, 0, 2],
+  );
+  [236.519744, 245.946193, 143.255724, 234.529276].forEach((length, i) => near(result.transits[i].lengthMeters, length, 1e-5));
+  near(result.transits[0].durationSeconds, 39.564968, 1e-5);
+  const expected = [
+    [18.18021017, -65.81999455],
+    [18.18108983, -65.81999455],
+    [18.18171886, -65.81820458],
+    [18.18088983, -65.81869455],
+    [18.18021017, -65.81880545],
+  ];
+  result.transits.flatMap((t) => t.via).forEach((p, i) => {
+    near(p[0], expected[i][0], 1e-8);
+    near(p[1], expected[i][1], 1e-8);
+  });
+  const violations = ZonePlanner.violations(plan, result);
+  assert.deepEqual(
+    violations.map((v) => v.message),
+    ["La ruta de Waypoints 7 entra en «Zona restringida 3»"],
+  );
+  near(violations[0].at[0], 18.1822, 1e-8);
+  near(violations[0].at[1], -65.8184, 1e-8);
+});
+
+test("zonas: el tránsito y el regreso rodean el cuadro a 10 m", () => {
+  const plan = { ...newPlan("Z", [block(), photoAt(0, 100)]), takeoff: at(0, 0) };
+  const result = PlanPlanner.plan(plan);
+  const via = result.items[1].approach.via.map(pr.toLocal);
+  assert.equal(via.length, 2);
+  near(Math.abs(via[0].x), 40, 1e-6);
+  near(via[0].y, 20, 1e-6);
+  near(Math.abs(via[1].x), 40, 1e-6);
+  near(via[1].y, 80, 1e-6);
+  assert.equal(result.home.via.length, 2);
+  assert.deepEqual(ZonePlanner.violations(plan, result), []);
+});
+
+test("zonas: una baja se pasa por encima y una alta solo cuenta para el regreso", () => {
+  const plan = (zone, finishAction = "HOVER") => ({ ...newPlan("Z", [zone, photoAt(0, 100)]), takeoff: at(0, 0), finishAction });
+  assert.equal(PlanPlanner.plan(plan(block(20))).items[1].approach.via.length, 0);
+  assert.equal(PlanPlanner.plan(plan(block(40))).items[1].approach.via.length, 2);
+  const upper = PlanPlanner.plan(plan(block(null, 50), "GO_HOME"));
+  assert.equal(upper.items[1].approach.via.length, 0);
+  assert.equal(upper.home.via.length, 2);
+  assert.equal(PlanPlanner.plan(plan({ ...block(), enabled: false })).items[1].approach.via.length, 0);
+});
+
+test("zonas: lo que entra, el despegue y el aterrizaje", () => {
+  const map = { ...newMapComponent([at(-20, 50), at(20, 50), at(20, 120), at(-20, 120)]), altitude: 30 };
+  const plan = { ...newPlan("Z", [map, block()]), takeoff: at(0, 200), finishAction: "HOVER" };
+  assert.deepEqual(
+    ZonePlanner.violations(plan, PlanPlanner.plan(plan)).map((v) => v.message),
+    ["La ruta de Mapa 1 entra en «Zona restringida 2»"],
+  );
+  const over = { ...plan, components: [map, block(25)] };
+  assert.deepEqual(ZonePlanner.violations(over, PlanPlanner.plan(over)), []);
+  const inside = { ...newPlan("Z", [block(), photoAt(0, 100)]), takeoff: at(0, 50), finishAction: "HOVER" };
+  assert.equal(ZonePlanner.violations(inside, PlanPlanner.plan(inside))[0].message, "El despegue está dentro de «Zona restringida 1»");
+  const landing = { ...newPlan("Z", [block(), photoAt(0, 50, 40)]), takeoff: at(0, 0), finishAction: "LAND" };
+  assert.ok(ZonePlanner.violations(landing, PlanPlanner.plan(landing)).some((v) => v.message === "El aterrizaje está dentro de «Zona restringida 1»"));
+  // Una zona no se vuela ni pone el despegue.
+  const auto = PlanPlanner.plan(newPlan("Z", [block(), photoAt(0, 100)]));
+  assert.equal(auto.items[0].result, null);
+  near(pr.toLocal(auto.takeoff).y, 60, 1e-6);
+});
+
+test("comandos: tiempo, fotos, alturas y sin punto donde terminó lo anterior", () => {
+  const commands = {
+    ...newCommandsComponent(at(50, 0), [
+      newCommand("heading", 90),
+      newCommand("photo"),
+      newCommand("altitude", 35),
+      newCommand("gimbal", -45),
+      newCommand("photo"),
+      newCommand("wait", 3),
+    ]),
+    altitude: 20,
+  };
+  const route = PointsPlanner.commands(commands);
+  near(route.durationSeconds, 2 + 4 + 15 / 3 + 4 + 3, 1e-9);
+  assert.equal(route.photoCount, 2);
+  assert.equal(endAltitude(commands), 35);
+  assert.equal(commandsCaptureMode(commands), "photo");
+  assert.equal(commandsCaptureMode({ ...commands, commands: [newCommand("videoStart"), newCommand("photo")] }), "video");
+  assert.equal(componentSummary(commands), "20 m · 6 comandos · 2 fotos");
+
+  const photo = photoAt(0, 60);
+  const loose = { ...newCommandsComponent(null, [newCommand("wait", 2)]), altitude: 40 };
+  const result = PlanPlanner.plan({ ...newPlan("C", [photo, loose]), takeoff: at(0, 0) });
+  assert.deepEqual(result.items[1].result.path, [photo.position]);
+  assert.equal(result.items[1].approach.lengthMeters, 0);
+  near(result.items[1].approach.durationSeconds, 10 / 3, 1e-9);
+  assert.equal(PlanPlanner.plan(newPlan("C", [loose])).flown, 0);
+});
+
+test("comandos y zonas: se guardan y se leen igual, y lo desconocido se salta", () => {
+  const plan = normalizePlan(structuredClone(zonesFixture));
+  const back = normalizePlan(JSON.parse(serializePlan(plan)));
+  assert.deepEqual(back.components, plan.components);
+  const bare = normalizePlan({
+    components: [
+      { type: "commands", commands: [{ type: "wait" }, { type: "teleport", value: 3 }, { type: "altitude", value: 50 }], captureMode: "photo" },
+      { type: "zone", boundary: [[18.18, -65.82]], maxAltitude: null, altitude: 0, shape: "hexagon" },
+    ],
+  });
+  const [commands, zone] = bare.components;
+  assert.deepEqual(commands.commands, [newCommand("wait", 5), newCommand("altitude", 50)]);
+  assert.equal(commands.position, null);
+  assert.equal(commands.gimbalPitch, -30);
+  assert.equal("captureMode" in commands, false);
+  assert.equal(zone.shape, "polygon");
+  assert.equal(zone.maxAltitude, null);
+  assert.equal("altitude" in zone, false);
+  assert.equal(ZonePlanner.hasShape(zone), false);
+  // Duplicar los pone al lado; la zona se dibuja con 72 puntos si es redonda.
+  const round = newZoneComponent("circle", [at(0, 0), at(10, 0)]);
+  near(pr.toLocal(copyComponent(round).boundary[0]).x, 30, 1e-6);
+  assert.equal(componentPoints(round).length, 72);
+  assert.equal(componentSummary(round), "todas las alturas · radio 10 m");
+  assert.equal(componentSummary({ ...block(45, 5), enabled: false }), "de 5 a 45 m · 0.24 ha · no cuenta");
+});
+
+test("comandos y zonas: la vista previa rodea las zonas y dura lo estimado; el KML las dibuja", () => {
+  const plan = normalizePlan(structuredClone(zonesFixture));
+  const result = PlanPlanner.plan(plan);
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, result.durationSeconds, 1e-6);
+  // Pasa por los puntos del desvío.
+  const corner = result.transits[0].via[0];
+  assert.ok(timeline.segments.some((s) => s.to.position[0] === corner[0] && s.to.position[1] === corner[1]));
+  // En los comandos sube a 60 m y gira a 200° antes de la segunda foto.
+  const shots = timeline.segments.filter((s) => s.label === "4. Comandos" && s.kind === "shot");
+  assert.equal(shots.length, 2);
+  assert.equal(shots[1].from.altitude, 60);
+  near(FlightPreview.at(timeline, (shots[1].t0 + shots[1].t1) / 2).heading, 200, 1e-9);
+  assert.equal(FlightPreview.at(timeline, timeline.duration).photos, 3);
+  const kml = exportKml(plan);
+  assert.ok(kml.includes("Zona restringida 1 · todas las alturas"));
+  assert.ok(kml.includes("Zona restringida 5 · desde 70 m (no cuenta)") === false);
+  assert.ok(kml.includes("Zona restringida 5 · todas las alturas (no cuenta)"));
 });
 
 // ---- Seguir el terreno: los mismos números que Terrain.kt ----
