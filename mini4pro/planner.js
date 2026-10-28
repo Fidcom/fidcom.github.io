@@ -26,10 +26,15 @@ export const cameraFor = (mission) => (mission.photoSize === "12mp" ? MINI_4_PRO
 
 // Opciones de cada parámetro: [valor en el JSON, texto]. Son las mismas que los enum de Mission.kt.
 
-/** Patrón del mapa: líneas en una dirección, o cruzadas (dos pasadas a 90°) como "Grid" en Dronelink. */
+/**
+ * Patrón del mapa: líneas en una dirección, cruzadas (dos pasadas a 90°) como "Grid" en Dronelink,
+ * u oblicuo (una pasada mirando abajo y cuatro con la cámara inclinada hacia cada lado, para modelos
+ * 3D con las paredes).
+ */
 export const MAP_PATTERNS = [
   ["normal", "Normal"],
   ["grid", "Cruzado"],
+  ["oblique", "Oblicuo"],
 ];
 
 export const FINISH_ACTIONS = [
@@ -344,12 +349,62 @@ export const MapPlanner = {
     };
   },
 
+  /**
+   * Las pasadas del mapa: una, dos cruzadas, o la vertical y cuatro oblicuas. Cada una tiene líneas
+   * con rumbo `direction`; en las oblicuas la cámara mira siempre a `facing`, inclinada `pitch`.
+   */
+  passes(mission) {
+    if (mission.pattern === "grid") return [{ direction: mission.direction }, { direction: mission.direction + 90 }];
+    if (mission.pattern !== "oblique") return [{ direction: mission.direction }];
+    const pitch = MapPlanner.obliquePitch(mission);
+    return [{ direction: mission.direction }].concat(
+      [0, 1, 2, 3].map((k) => ({ direction: mission.direction, facing: Geo.normalize(mission.direction + 90 * k), pitch })),
+    );
+  },
+
+  obliquePitch: (mission) => Math.min(-20, Math.max(-80, mission.obliquePitch ?? -45)),
+
+  /**
+   * Cuánto se corre una pasada oblicua hacia atrás para que la cámara, inclinada `pitch`, mire al
+   * área desde `altitude` metros: lo que hay entre el dron y donde apunta en el suelo.
+   */
+  obliqueShift: (altitude, pitch) => altitude / Math.tan(rad(Math.abs(pitch))),
+
+  /**
+   * Separación de una pasada oblicua: entre líneas, con la huella vista de lejos (más ancha que
+   * mirando abajo); entre fotos, la misma de la pasada vertical (`nadir`).
+   */
+  obliqueSpacing(mission, pass, nadir) {
+    if (mission.spacing === "distance") return nadir;
+    const slant = mission.altitude / Math.sin(rad(Math.abs(pass.pitch ?? -90)));
+    const [footWidth, footHeight] = MapPlanner.footprint(cameraFor(mission), slant);
+    // Mirando de lado respecto a las líneas, el lado corto de la foto queda entre una línea y otra.
+    const offset = Geo.normalize((pass.facing ?? pass.direction) - pass.direction) % 180;
+    const across = offset > 45 && offset < 135 ? footHeight : footWidth;
+    return { line: Math.max(1, across * (1 - mission.sideOverlap / 100)), photo: nadir.photo };
+  },
+
+  /** El área corrida `meters` metros hacia el rumbo `bearing`. */
+  shifted(boundary, bearing, meters) {
+    if (boundary.length === 0) return boundary;
+    const pr = projection(Geo.centroid(boundary));
+    const dx = Math.sin(rad(bearing)) * meters;
+    const dy = Math.cos(rad(bearing)) * meters;
+    return boundary.map((p) => {
+      const v = pr.toLocal(p);
+      return pr.toGeo({ x: v.x + dx, y: v.y + dy });
+    });
+  },
+
   /** `from`: de dónde viene el dron (despegue o fin del componente anterior), para empezar cerca. */
   plan(mission, from = null) {
     const camera = cameraFor(mission);
     const photos = mission.captureMode === "photo";
-    const directions = mission.pattern === "grid" ? [mission.direction, mission.direction + 90] : [mission.direction];
-    const spacings = directions.map((d) => MapPlanner.spacing(mission, d));
+    const passes = MapPlanner.passes(mission);
+    const nadir = MapPlanner.spacing(mission, mission.direction);
+    const spacings = passes.map((pass) =>
+      pass.facing === undefined ? MapPlanner.spacing(mission, pass.direction) : MapPlanner.obliqueSpacing(mission, pass, nadir),
+    );
     const photoSpacing = Math.min(...spacings.map((sp) => sp.photo));
     // La cámara no puede tomar fotos más rápido que minPhotoInterval.
     const speed = photos ? Math.max(0.5, Math.min(mission.maxSpeed, photoSpacing / mission.minPhotoInterval)) : mission.maxSpeed;
@@ -357,10 +412,14 @@ export const MapPlanner = {
     let legs = [];
     let positions = 0;
     if (mission.boundary.length >= 3) {
-      directions.forEach((direction, pass) => {
-        let passLegs = MapPlanner.gridLegs(mission.boundary, direction, spacings[pass].line);
+      passes.forEach((it, pass) => {
+        // Las pasadas oblicuas se corren hacia atrás para que la cámara mire al área.
+        const oblique = it.facing !== undefined;
+        const area = oblique ? MapPlanner.shifted(mission.boundary, it.facing, -MapPlanner.obliqueShift(mission.altitude, it.pitch)) : mission.boundary;
+        let passLegs = MapPlanner.gridLegs(area, it.direction, spacings[pass].line);
+        if (oblique) passLegs = passLegs.map((leg) => ({ ...leg, heading: it.facing, gimbalPitch: it.pitch }));
         // La primera pasada empieza donde se puso el inicio (o lo más cerca de donde viene el dron);
-        // la segunda, cerca de donde acabó la primera.
+        // las demás, cerca de donde acabó la anterior.
         const near = pass === 0 ? (mission.start ?? from) : legs.at(-1)?.end;
         if (near) passLegs = startNearest(near, passLegs);
         positions += passLegs.reduce((sum, leg) => sum + Math.floor(Geo.distance(leg.start, leg.end) / spacings[pass].photo) + 1, 0);
@@ -458,7 +517,7 @@ export const MapPlanner = {
  */
 function startNearest(point, legs) {
   if (legs.length === 0) return legs;
-  const flipped = legs.map((leg) => ({ start: leg.end, end: leg.start }));
+  const flipped = legs.map((leg) => ({ ...leg, start: leg.end, end: leg.start }));
   const options = [legs, flipped, [...legs].reverse(), [...flipped].reverse()];
   return options.reduce((best, option) =>
     Geo.distance(point, option[0].start) < Geo.distance(point, best[0].start) ? option : best,
@@ -474,6 +533,7 @@ function extendLeg(leg, meters) {
   const ux = (b.x - a.x) / length;
   const uy = (b.y - a.y) / length;
   return {
+    ...leg,
     start: pr.toGeo({ x: a.x - ux * meters, y: a.y - uy * meters }),
     end: pr.toGeo({ x: b.x + ux * meters, y: b.y + uy * meters }),
   };
@@ -1100,6 +1160,8 @@ export function newMapComponent(boundary = []) {
     sideOverlap: 70,
     direction: 0,
     pattern: "normal",
+    // En el patrón oblicuo: la inclinación de la cámara en las cuatro pasadas de lado (-80 a -20).
+    obliquePitch: -45,
     start: null,
     gimbalPitch: -90,
     maxSpeed: 8,
@@ -1371,6 +1433,7 @@ export function normalizeComponent(json) {
   if (typeof component.name !== "string" || !component.name.trim()) component.name = null;
   component.enabled = component.enabled !== false;
   if ("terrainFollow" in base) component.terrainFollow = component.terrainFollow === true;
+  if (type === "map") component.obliquePitch = finite(component.obliquePitch, base.obliquePitch);
   if (type === "waypoints") {
     component.altitude = finite(component.altitude, base.altitude);
     component.points = (Array.isArray(json.points) ? json.points : []).map((p) => normalizeWaypoint(p, component.altitude)).filter(Boolean);
@@ -2295,7 +2358,7 @@ function componentDetails(component) {
   if (component.type === "map") {
     if (component.boundary.length < 3) return `${num(component.altitude)} m · sin área`;
     const area = Geo.area(component.boundary) / 10000;
-    const pattern = component.pattern === "grid" ? "Cruzado" : "Normal";
+    const pattern = MAP_PATTERNS.find(([key]) => key === component.pattern)?.[1] ?? "Normal";
     const spacing =
       component.spacing === "distance"
         ? `${num(component.frontDistance, 1)} × ${num(component.sideDistance, 1)} m`

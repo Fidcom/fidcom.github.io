@@ -81,9 +81,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261029d";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029d";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029d";
+} from "./planner.js?v=20261029e";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029e";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029e";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -2208,7 +2208,31 @@ function buildMapParams(params, c) {
   }
 
   section(params, "CUADRÍCULA");
-  choiceParam(params, c, { key: "pattern", label: "Patrón", options: MAP_PATTERNS });
+  choiceParam(params, c, {
+    key: "pattern",
+    label: "Patrón",
+    options: MAP_PATTERNS,
+    rebuild: true,
+    help: () =>
+      ({
+        normal: "",
+        grid: "Dos pasadas a 90°: mejor modelo 3D, el doble de tiempo",
+        oblique:
+          "Una pasada mirando abajo y cuatro con la cámara inclinada hacia cada lado, para modelos 3D con las paredes. Unas 5 veces el tiempo: usa la reanudación al cambiar la batería",
+      })[c.pattern],
+  });
+  if (c.pattern === "oblique") {
+    numberParam(params, c, {
+      key: "obliquePitch",
+      label: "Inclinación oblicua",
+      unit: "°",
+      min: -80,
+      max: -20,
+      slider: true,
+      help: () =>
+        `Cada pasada de lado vuela ${num(MapPlanner.obliqueShift(c.altitude, MapPlanner.obliquePitch(c)))} m hacia atrás para que la cámara mire al área`,
+    });
+  }
   const direction = numberParam(params, c, {
     key: "direction",
     label: "Dirección de las líneas",
@@ -2266,7 +2290,7 @@ function buildMapParams(params, c) {
   }
   numberParam(params, c, {
     key: "gimbalPitch",
-    label: "Inclinación del gimbal",
+    label: c.pattern === "oblique" ? "Inclinación en la pasada vertical" : "Inclinación del gimbal",
     unit: "°",
     min: -90,
     max: 0,
