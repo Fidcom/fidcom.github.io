@@ -7,6 +7,9 @@ import {
   COLOR_PROFILES,
   EV_VALUES,
   EXPOSURE_MODES,
+  FACADE_FACES,
+  FACADE_PATTERNS,
+  FACADE_SIDES,
   FINISH_ACTIONS,
   FOCUS_MODES,
   FRAME_RATES,
@@ -27,6 +30,7 @@ import {
   WAYPOINT_ACTIONS,
   WHITE_BALANCES,
   CorridorPlanner,
+  FacadePlanner,
   Geo,
   LENS_DEGREES,
   LOCALE,
@@ -45,6 +49,7 @@ import {
   hasGeometry,
   isKnown,
   newCorridorComponent,
+  newFacadeComponent,
   newMapComponent,
   newOrbitComponent,
   newPanoComponent,
@@ -66,9 +71,9 @@ import {
   typeName,
   waypointHeading,
   TerrainFollow,
-} from "./planner.js?v=20261029a";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029a";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029a";
+} from "./planner.js?v=20261029b";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029b";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029b";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -139,8 +144,8 @@ const rad = (d) => (d * Math.PI) / 180;
 
 const selected = () => current?.components.find((c) => c.id === selectedId) ?? null;
 const selectedItem = () => planResult?.items.find((item) => item.component.id === selectedId) ?? null;
-const TYPE_ICONS = { map: "grid", corridor: "corridor", orbit: "orbit", waypoints: "waypoints", photo: "camera", pano: "pano" };
-const typeIcon = (component) => TYPE_ICONS[component.type] ?? "plan";
+const TYPE_ICONS = { map: "grid", corridor: "corridor", orbit: "orbit", waypoints: "waypoints", photo: "camera", pano: "pano", facade: "facade" };
+const typeIcon = (component) => (component.type === "facade" && component.face !== "line" ? "inspection" : TYPE_ICONS[component.type] ?? "plan");
 const isPointType = (component) => component?.type === "photo" || component?.type === "pano";
 
 // ---------- Mapa ----------
@@ -376,6 +381,29 @@ function drawComponent({ component, result }, { faded, dim, arrows, interactive,
       });
     }
     if (!editing) result.path.forEach((at) => layers.push(dot(at, ACCENT, interactive, off)));
+  } else if (component.type === "facade") {
+    // La cara: una pared gruesa (un lado) o la planta de la estructura.
+    const shape = FacadePlanner.points(component);
+    const outline = { color: "#ffffff", opacity: faded || dim ? 0.7 : 1, interactive };
+    if (component.face === "line" && shape.length >= 2) {
+      layers.push(L.polyline(shape, { ...outline, weight: dim ? 3 : 5, lineCap: "square", lineJoin: "miter" }));
+    } else if (component.face !== "line" && shape.length >= 2) {
+      layers.push(L.polygon(shape, { ...outline, weight: dim ? 1.5 : 2.5, fillColor: "#ffffff", fillOpacity: faded || dim ? 0.08 : 0.16 }));
+    }
+    if (result) {
+      layers.push(L.polyline(result.path, route));
+      // Hacia dónde mira la cámara en la primera parada.
+      if (editing) layers.push(viewCone(result.stations[0].position, result.stations[0].heading, LENS_DEGREES, 30, dim));
+      // Las columnas: donde se detiene a tomar las fotos.
+      if (!faded) {
+        const seen = new Set();
+        for (const { position } of result.stations) {
+          const key = position.join();
+          if (!seen.has(key)) layers.push(dot(position, ACCENT, interactive, off));
+          seen.add(key);
+        }
+      }
+    }
   } else if (isPointType(component) && component.position) {
     const span = component.type === "pano" ? PanoPlan.coverage(component.panoType) : LENS_DEGREES;
     // Más largo que el pin del componente, para que se vea por debajo de él.
@@ -675,6 +703,17 @@ function renderStats() {
       ["Fotos", result ? String(result.photoCount) : "—"],
       ["Altura", altitudeText(component.altitude)],
     ];
+  } else if (component.type === "facade") {
+    stats = [
+      ["Duración", result ? formatDuration(result.durationSeconds) : "—"],
+      component.captureMode === "photo"
+        ? ["Fotos", result ? String(result.photoCount) : "—"]
+        : ["Captura", component.captureMode === "video" ? "Video" : "Nada"],
+      ["Distancia", result ? distanceText(result.lengthMeters) : "—"],
+      ["Columnas", result ? String(result.columns) : "—"],
+      ["Filas", result ? String(result.rows) : "—"],
+      ["GSD", `${num(MapPlanner.gsd(cameraFor(component), component.distance), 2)} cm/px`],
+    ];
   } else if (!isKnown(component)) {
     stats = [["Tipo", component.type]];
   } else {
@@ -693,7 +732,7 @@ function updateHint() {
   if (!component) {
     hint.textContent = current.components.length
       ? "Haz clic en un componente para editarlo · arrastra la H morada para mover el despegue"
-      : "Añade un componente a la misión: un mapa, un corredor, una órbita, waypoints, una foto o una panorámica";
+      : "Añade un componente a la misión: un mapa, un corredor, una órbita, waypoints, una foto, una panorámica o una fachada";
   } else if (component.type === "map") {
     const n = component.boundary.length;
     hint.textContent =
@@ -733,10 +772,32 @@ function updateHint() {
       : component.type === "pano" && component.panoType === "sphere"
         ? "Arrastra el punto para moverlo"
         : "Arrastra el punto para moverlo o la flecha para cambiar hacia dónde mira la cámara";
+  } else if (component.type === "facade") {
+    hint.textContent = facadeHint(component);
   } else {
     hint.textContent = "Este componente es de una versión más nueva: aquí no se puede editar";
   }
   hint.hidden = false;
+}
+
+function facadeHint(component) {
+  const n = component.boundary.length;
+  if (FacadePlanner.hasShape(component) && !selectedItem()?.result) {
+    return "Es demasiado grande para un vuelo (más de 3000 paradas): acércate en el mapa y márcala de nuevo";
+  }
+  if (component.face === "line") {
+    if (n === 0) return "Haz clic en el mapa en un extremo de la pared que vas a fotografiar";
+    if (n === 1) return "Haz clic en el otro extremo de la pared; si dobla en una esquina, marca también la esquina antes";
+    return "La línea azul es por donde vuela; el lado se cambia en el panel · arrastra un punto, un + o el centro para cambiar la pared · clic en un punto para quitarlo";
+  }
+  if (component.face === "circle") {
+    return n < 2
+      ? "Haz clic en el mapa en el centro de la estructura: una torre, un tanque, un árbol"
+      : "Arrastra el centro para mover la estructura o el cuadrito para cambiar su tamaño";
+  }
+  if (n === 0) return "Haz clic en el mapa en las esquinas de la estructura (el borde del techo)";
+  if (n < 3) return "Sigue marcando esquinas: hacen falta al menos 3";
+  return "Arrastra el centro para mover la estructura · las esquinas para cambiarla · el + para agregar otra · clic en una esquina para quitarla";
 }
 
 map.on("click", (event) => {
@@ -749,6 +810,11 @@ map.on("click", (event) => {
     editGeometry(() => component.path.push(point));
   } else if (component.type === "orbit") {
     if (!component.center) editGeometry(() => (component.center = point));
+  } else if (component.type === "facade") {
+    if (component.face === "line") editGeometry(() => component.boundary.push(point));
+    else if (component.face === "polygon") editGeometry(() => (component.boundary = Geo.insertIntoPolygon(component.boundary, point)));
+    // Redonda: empieza con 10 m de radio; el cuadrito lo cambia.
+    else if (component.boundary.length < 2) editGeometry(() => (component.boundary = [point, projection(point).toGeo({ x: 10, y: 0 }).map(round7)]));
   } else if (component.type === "waypoints") {
     insertWaypoint(component, selectedPoint !== null ? selectedPoint + 1 : component.points.length, point);
   } else if (isPointType(component) && !component.position) {
@@ -834,6 +900,7 @@ function drawHandles() {
   else if (component?.type === "orbit" && component.center) drawOrbitHandles(component);
   else if (component?.type === "waypoints") drawWaypointHandles(component);
   else if (isPointType(component) && component.position) drawPointHandles(component);
+  else if (component?.type === "facade") drawFacadeHandles(component);
 }
 
 /** La H morada: dónde despega el dron. Sin marcarla, va en el centro del primer componente. */
@@ -1012,6 +1079,91 @@ function drawCorridorHandles(component) {
     const marker = startPin(item);
     addHandle(marker, () => selectedItem()?.result?.path[0]);
   }
+}
+
+/**
+ * La cara de una fachada. Un lado o con esquinas: sus puntos se arrastran y se quitan con clic, un
+ * + mete otro en medio y el círculo del centro la mueve entera. Redonda: el centro la mueve y el
+ * cuadrito cambia el radio.
+ */
+function drawFacadeHandles(component) {
+  const roundPoint = ([lat, lon]) => [round7(lat), round7(lon)];
+  const moveHandle = (at, icon, title) => {
+    const marker = L.marker(at(), { icon, draggable: true, zIndexOffset: 1100, title });
+    let from = null;
+    let boundary = null;
+    marker.on("dragstart", () => {
+      from = at();
+      boundary = component.boundary;
+    });
+    draggable(marker, (to) => (component.boundary = Geo.translate(boundary, from, to).map(roundPoint)));
+    addHandle(marker, at);
+  };
+
+  if (component.face === "circle") {
+    if (component.boundary.length < 2) return;
+    moveHandle(() => component.boundary[0], divIcon("orbit-center", 34, '<svg><use href="#i-inspection" /></svg>'), "Arrastra para mover la estructura");
+    const radius = L.marker(component.boundary[1], { icon: divIcon("radius-handle", 16), draggable: true, zIndexOffset: 1000, title: "Arrastra para cambiar el tamaño" });
+    draggable(radius, (point) => {
+      if (Geo.distance(component.boundary[0], point) < 1) return;
+      component.boundary[1] = point;
+      fieldSetters.structureRadius?.(Math.round(Geo.distance(component.boundary[0], point) * 10) / 10);
+    });
+    addHandle(radius, () => component.boundary[1]);
+  } else {
+    const closed = component.face === "polygon";
+    const count = component.boundary.length;
+    const midpointOf = (i) => {
+      const a = component.boundary[i];
+      const b = closed && component.boundary.length >= 3 ? component.boundary[(i + 1) % component.boundary.length] : component.boundary[i + 1];
+      return a && b ? [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] : null;
+    };
+    const edges = closed && count >= 3 ? count : count - 1;
+    for (let i = 0; i < edges; i++) {
+      const marker = L.marker(midpointOf(i), { icon: divIcon("mid-handle", 16, "+"), draggable: true, zIndexOffset: 500, title: "Arrastra o toca para agregar un punto" });
+      let inserted = -1;
+      marker.on("dragstart", () => {
+        remember();
+        inserted = i + 1;
+        component.boundary.splice(inserted, 0, toPoint(marker.getLatLng()));
+      });
+      marker.on("drag", () => {
+        component.boundary[inserted] = toPoint(marker.getLatLng());
+        redrawShapes();
+      });
+      marker.on("dragend", () => {
+        save();
+        refresh();
+      });
+      marker.on("click", (event) => {
+        L.DomEvent.stop(event);
+        editGeometry(() => component.boundary.splice(i + 1, 0, midpointOf(i)));
+      });
+      addHandle(marker, () => midpointOf(i));
+    }
+    component.boundary.forEach((point, i) => {
+      const marker = L.marker(point, { icon: divIcon("vertex-handle", 20), draggable: true, zIndexOffset: 1000, title: "Arrastra para mover · clic para quitar" });
+      draggable(marker, (p) => (component.boundary[i] = p));
+      const removeVertex = (event) => {
+        L.DomEvent.stop(event);
+        editGeometry(() => component.boundary.splice(i, 1));
+      };
+      marker.on("click", removeVertex);
+      marker.on("contextmenu", removeVertex);
+      addHandle(marker, () => component.boundary[i]);
+    });
+    if (FacadePlanner.hasShape(component)) {
+      moveHandle(
+        () => Geo.centroid(component.boundary),
+        divIcon("move-handle", 32, '<svg><use href="#i-move" /></svg>'),
+        closed ? "Arrastra para mover toda la estructura" : "Arrastra para mover toda la pared",
+      );
+    }
+  }
+
+  // El pin de inicio: la columna más cerca de donde viene el dron.
+  const item = selectedItem();
+  if (item?.result) addHandle(startPin(item), () => selectedItem()?.result?.path[0]);
 }
 
 function drawOrbitHandles(component) {
@@ -1259,6 +1411,7 @@ function buildPanel() {
     else if (component.type === "waypoints") buildWaypointsParams(container, component);
     else if (component.type === "photo") buildPhotoParams(container, component);
     else if (component.type === "pano") buildPanoParams(container, component);
+    else if (component.type === "facade") buildFacadeParams(container, component);
     else buildUnknownParams(container, component);
   } else {
     $("plan-name").value = current.name;
@@ -1566,6 +1719,8 @@ function buildPlanBody(body) {
       ["waypoints", "Waypoints", "Un recorrido por puntos, con foto o espera en cada uno", () => addComponent(newWaypointsComponent())],
       ["camera", "Foto", "Una foto desde un punto, mirando hacia donde quieras", () => addComponent(newPhotoComponent())],
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => addComponent(newPanoComponent())],
+      ["facade", "Fachada", "Fotos frente a un lado de un edificio, por columnas o filas", () => addComponent(newFacadeComponent())],
+      ["inspection", "Inspección", "Alrededor de una torre, un tanque o un edificio", () => addComponent(newFacadeComponent("polygon"))],
       ["upload", "Desde un KML o KMZ", "Áreas, líneas o puntos de Google Earth, Dronelink o DJI", () => importKml("component")],
     ]);
   });
@@ -2096,6 +2251,202 @@ function buildCorridorParams(params, c) {
   });
 
   if (c.captureMode !== "none") cameraSettingsParams(params, c, { photo: photos });
+}
+
+function buildFacadeParams(params, c) {
+  const plan = () => selectedItem()?.result ?? FacadePlanner.plan(c);
+  const photos = c.captureMode === "photo";
+  const line = c.face === "line";
+  const before = c.face;
+
+  section(params, line ? "FACHADA" : "ESTRUCTURA");
+  choiceParam(params, c, {
+    key: "face",
+    label: "Forma",
+    options: FACADE_FACES,
+    rebuild: true,
+    help: () =>
+      ({
+        line: "Un lado: marca la pared con una línea (puede doblar en las esquinas)",
+        circle: "Una torre, un tanque o un árbol: da la vuelta completa mirando al centro",
+        polygon: "Un edificio o una casa: marca sus esquinas y da la vuelta completa",
+      })[c.face],
+    onChange: (face) => (c.boundary = facadeShape(c.boundary, before, face)),
+  });
+  if (line) {
+    choiceParam(params, c, {
+      key: "side",
+      label: "El dron vuela a la",
+      options: FACADE_SIDES,
+      help: () => "Yendo del primer punto de la línea al último; la línea azul muestra por dónde",
+    });
+    note(params, "Si despegas del otro lado de la pared, llega dándole la vuelta por el extremo más cercano, sin cruzarla.");
+  }
+  if (c.face === "circle" && c.boundary.length >= 2) {
+    // El radio no se guarda aparte: es la distancia del centro al segundo punto.
+    const size = {
+      get structureRadius() {
+        return Math.round(Geo.distance(c.boundary[0], c.boundary[1]) * 10) / 10;
+      },
+      set structureRadius(value) {
+        const b = rad(Geo.bearing(c.boundary[0], c.boundary[1]));
+        c.boundary[1] = projection(c.boundary[0]).toGeo({ x: value * Math.sin(b), y: value * Math.cos(b) }).map(round7);
+      },
+    };
+    numberParam(params, size, { key: "structureRadius", label: "Radio de la estructura", unit: "m", min: 1, max: 300, step: 0.5, decimals: 1, handles: true });
+  }
+  numberParam(params, c, {
+    key: "distance",
+    label: "Distancia a la cara",
+    unit: "m",
+    min: 3,
+    max: 100,
+    step: 0.5,
+    decimals: 1,
+    slider: true,
+    help: () => {
+      const [w, h] = MapPlanner.footprint(cameraFor(c), c.distance);
+      return `GSD ${num(MapPlanner.gsd(cameraFor(c), c.distance), 2)} cm/px · cada foto cubre ${num(w)} × ${num(h)} m de la cara`;
+    },
+  });
+
+  section(params, "ALTURA");
+  numberParam(params, c, {
+    key: "altitude",
+    label: "Primera fila",
+    unit: "m",
+    min: 2,
+    max: 120,
+    slider: true,
+    help: () => "Sobre el despegue. Empieza por aquí: puede ser la más baja o la más alta",
+  });
+  numberParam(params, c, {
+    key: "finalAltitude",
+    label: "Última fila",
+    unit: "m",
+    min: 2,
+    max: 120,
+    slider: true,
+    help: () => {
+      const r = plan();
+      return r ? `${r.rows} ${r.rows === 1 ? "fila" : "filas"} separadas ${num(r.verticalSpacing, 1)} m` : "";
+    },
+  });
+  choiceParam(params, c, {
+    key: "pattern",
+    label: "Recorrido",
+    options: FACADE_PATTERNS,
+    help: () =>
+      c.pattern === "vertical"
+        ? "Sube y baja frente a la cara, columna por columna"
+        : line
+          ? "Recorre la cara de lado a lado a cada altura"
+          : "Da una vuelta completa a cada altura",
+  });
+
+  section(params, "ESPACIADO");
+  choiceParam(params, c, {
+    key: "spacing",
+    label: "Separar por",
+    options: SPACING_MODES,
+    rebuild: true,
+    onChange: (value) => {
+      if (value !== "distance") return;
+      // Empieza con la separación que daba el traslape.
+      const [h, v] = FacadePlanner.spacing({ ...c, spacing: "overlap" });
+      c.horizontalDistance = Math.round(h * 10) / 10;
+      c.verticalDistance = Math.round(v * 10) / 10;
+    },
+  });
+  if (c.spacing === "distance") {
+    numberParam(params, c, { key: "horizontalDistance", label: "Entre columnas", unit: "m", min: 0.5, max: 100, step: 0.5, decimals: 1 });
+    numberParam(params, c, { key: "verticalDistance", label: "Entre filas", unit: "m", min: 0.5, max: 100, step: 0.5, decimals: 1 });
+  } else {
+    numberParam(params, c, {
+      key: "horizontalOverlap",
+      label: "Traslape horizontal",
+      unit: "%",
+      min: 10,
+      max: 95,
+      slider: true,
+      help: () => `Columnas separadas ${num(FacadePlanner.spacing(c)[0], 1)} m (o menos, para que queden parejas)`,
+    });
+    numberParam(params, c, {
+      key: "verticalOverlap",
+      label: "Traslape vertical",
+      unit: "%",
+      min: 10,
+      max: 95,
+      slider: true,
+      help: () => `Filas separadas ${num(FacadePlanner.spacing(c)[1], 1)} m (o menos)`,
+    });
+  }
+
+  section(params, "VUELO Y GIMBAL");
+  numberParam(params, c, {
+    key: "speed",
+    label: "Velocidad entre paradas",
+    unit: "km/h",
+    scale: KMH,
+    min: 1,
+    max: 36,
+    step: 0.5,
+    decimals: 1,
+    help: () => `Se detiene en cada parada mirando a la cara; sube y baja a ${num(FacadePlanner.CLIMB_SPEED * KMH)} km/h`,
+  });
+  numberParam(params, c, {
+    key: "gimbalPitch",
+    label: "Inclinación del gimbal",
+    unit: "°",
+    min: -90,
+    max: 30,
+    slider: true,
+    help: () =>
+      Math.abs(c.gimbalPitch) < 1
+        ? "0° = de frente a la cara"
+        : `Se para a ${num(FacadePlanner.standoff(c), 1)} m de la cara en el suelo para mantener la distancia por donde mira`,
+  });
+  note(params, "Revisa que no haya cables, ramas ni postes entre el dron y la cara: vuela a la distancia marcada sin desviarse.");
+
+  section(params, "CAPTURA");
+  choiceParam(params, c, {
+    key: "captureMode",
+    label: "Durante el recorrido",
+    options: CAPTURE_MODES,
+    rebuild: true,
+    help: () => ({ photo: "Una foto en cada parada", video: "Graba todo el recorrido", none: "" })[c.captureMode],
+  });
+  if (photos) {
+    choiceParam(params, c, {
+      key: "photoSize",
+      label: "Tamaño de foto",
+      options: PHOTO_SIZES,
+      help: () => (c.photoSize === "12mp" ? "Menos detalle, pero guarda cada foto en unos 2 s" : "Más detalle; guarda cada foto en unos 5 s"),
+    });
+    choiceParam(params, c, {
+      key: "photoType",
+      label: "Tipo de foto",
+      options: PHOTO_TYPES,
+      help: () => (c.photoType === "single" ? "" : "Varias fotos con distinta exposición en cada parada, para HDR"),
+    });
+  }
+  if (c.captureMode !== "none") cameraSettingsParams(params, c, { photo: photos });
+}
+
+/**
+ * La cara marcada al cambiar de forma: la línea y las esquinas se pasan tal cual; a redonda, el
+ * círculo que las encierra; de redonda a otra, hay que marcarla de nuevo.
+ */
+function facadeShape(boundary, from, to) {
+  if (from === to) return boundary;
+  if (from === "circle") return [];
+  if (to === "circle") {
+    if (boundary.length < 2) return [];
+    const center = Geo.centroid(boundary);
+    const far = boundary.reduce((best, p) => (Geo.distance(center, p) > Geo.distance(center, best) ? p : best));
+    return [center.map(round7), far];
+  }
+  return boundary;
 }
 
 function buildOrbitParams(params, c) {
@@ -2723,14 +3074,16 @@ function cameraSettingsParams(params, c, { photo }) {
 
 // ---------- Crear, importar y borrar ----------
 
-function nextName(type) {
-  const count = Object.values(state.missions).filter((m) => m.components[0]?.type === type).length;
-  return `${typeName({ type })} ${count + 1}`;
+/** "Órbita 3": el nombre del tipo de `component` (o del tipo dado) y cuántas misiones empiezan con uno así. */
+function nextName(component) {
+  const name = typeName(typeof component === "string" ? { type: component } : component);
+  const count = Object.values(state.missions).filter((m) => m.components[0] && typeName(m.components[0]) === name).length;
+  return `${name} ${count + 1}`;
 }
 
 /** Una misión nueva con un solo componente, abierta en él. */
 function newMission(component) {
-  openPlan(null, newPlan(nextName(component.type), [component]), component.id);
+  openPlan(null, newPlan(nextName(component), [component]), component.id);
 }
 
 $("new-map").addEventListener("click", () => {
@@ -2752,6 +3105,8 @@ $("new-more").addEventListener("click", (event) => {
       ["waypoints", "Waypoints", "Un recorrido por puntos, con foto o espera en cada uno", () => newMission(newWaypointsComponent())],
       ["camera", "Foto", "Una foto desde un punto, mirando hacia donde quieras", () => newMission(newPhotoComponent())],
       ["pano", "Panorámica", "Esfera, 180°, angular o vertical desde un punto", () => newMission(newPanoComponent())],
+      ["facade", "Fachada", "Fotos frente a un lado de un edificio, por columnas o filas", () => newMission(newFacadeComponent())],
+      ["inspection", "Inspección", "Alrededor de una torre, un tanque o un edificio", () => newMission(newFacadeComponent("polygon"))],
     ],
     $("new-more").parentElement,
   );
@@ -2805,6 +3160,7 @@ function importedText(components) {
   add(count("map"), "mapa", "mapas");
   add(count("corridor"), "corredor", "corredores");
   add(count("orbit"), "órbita", "órbitas");
+  add(count("facade"), "fachada", "fachadas");
   for (const c of components.filter((c) => c.type === "waypoints")) parts.push(`un recorrido de ${c.points.length} puntos`);
   return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}` : parts[0];
 }
@@ -2916,6 +3272,8 @@ $("tool-clear").addEventListener("click", () => {
       selectedPoint = null;
     } else if (isPointType(component)) {
       component.position = null;
+    } else if (component.type === "facade") {
+      component.boundary = [];
     }
   });
   buildPanel();

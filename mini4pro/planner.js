@@ -95,6 +95,25 @@ export const WAYPOINT_ACTIONS = [
 ];
 
 /** Las panorámicas de DJI Fly (PanoType en Panorama.kt). */
+/** Fachada: un lado (una línea) o todo alrededor de una estructura. */
+export const FACADE_FACES = [
+  ["line", "Un lado"],
+  ["circle", "Redonda"],
+  ["polygon", "Con esquinas"],
+];
+
+/** De qué lado de la línea vuela el dron, yendo del primer punto al último. */
+export const FACADE_SIDES = [
+  ["left", "Izquierda"],
+  ["right", "Derecha"],
+];
+
+/** Columnas: sube y baja frente a la cara. Filas: la recorre de lado a lado a cada altura. */
+export const FACADE_PATTERNS = [
+  ["vertical", "Columnas"],
+  ["horizontal", "Filas"],
+];
+
 export const PANO_TYPES = [
   ["sphere", "Esfera"],
   ["180", "180°"],
@@ -573,6 +592,260 @@ export const CorridorPlanner = {
   },
 };
 
+// ---- Fachada ----
+
+const bearingOfV = (v) => Geo.normalize(deg(Math.atan2(v.x, v.y)));
+const unitV = (bearing) => ({ x: Math.sin(rad(bearing)), y: Math.cos(rad(bearing)) });
+/** Diferencia más corta entre dos rumbos, de -180 a 180. */
+const angleDifference = (from, to) => {
+  let d = Geo.normalize(to) - Geo.normalize(from);
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  return d;
+};
+const pathLengthV = (points) => points.slice(1).reduce((sum, p, i) => sum + lengthV(sub(p, points[i])), 0);
+
+/** Si el tramo p–q cruza el tramo a–b (tocarlo en un extremo no cuenta). */
+function segmentsCross(p, q, a, b) {
+  const d1 = cross(sub(q, p), sub(a, p));
+  const d2 = cross(sub(q, p), sub(b, p));
+  const d3 = cross(sub(b, a), sub(p, a));
+  const d4 = cross(sub(b, a), sub(q, a));
+  return d1 * d2 < 0 && d3 * d4 < 0;
+}
+
+/**
+ * Columnas a lo largo de `path` (cada tramo dividido en partes iguales de `spacing` o menos), con
+ * el rumbo de cada tramo y, en las esquinas, el del medio. Cerrado: el último punto es el primero.
+ */
+function spreadColumns(path, headings, spacing, closed) {
+  const columns = [];
+  const segments = path.length - 1;
+  for (let k = 0; k < segments; k++) {
+    const a = path[k];
+    const v = sub(path[k + 1], a);
+    const parts = Math.max(1, Math.ceil(lengthV(v) / spacing - 1e-9));
+    // Cada tramo pone su esquina de inicio y las de adentro; la del final es el inicio del siguiente.
+    for (let j = 0; j < parts; j++) {
+      const corner = j === 0 && (k > 0 || closed);
+      const before = headings[(k - 1 + segments) % segments];
+      const heading = corner ? Geo.normalize(before + angleDifference(before, headings[k]) / 2) : headings[k];
+      columns.push({ position: add(a, scale(v, j / parts)), heading });
+    }
+  }
+  if (!closed) columns.push({ position: path.at(-1), heading: headings.at(-1) });
+  return columns;
+}
+
+/** El contorno (antihorario) corrido `d` metros hacia afuera; las puntas muy agudas se cortan. */
+function facadeOutline(points, d) {
+  const n = points.length;
+  const dirs = points.map((p, i) => {
+    const v = sub(points[(i + 1) % n], p);
+    return scale(v, 1 / lengthV(v));
+  });
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const before = dirs[(i - 1 + n) % n];
+    const after = dirs[i];
+    const n1 = { x: before.y, y: -before.x };
+    const n2 = { x: after.y, y: -after.x };
+    const turn = cross(before, after);
+    const cos = dotV(before, after);
+    const p = points[i];
+    if (Math.abs(turn) < 1e-9) {
+      out.push(add(p, scale(n2, d)));
+    } else if (turn > 0 && 1 / Math.sqrt((1 + cos) / 2) > MITER_LIMIT) {
+      // Esquina por fuera muy aguda: dos puntos en vez de una punta larga.
+      out.push(add(p, scale(n1, d)), add(p, scale(n2, d)));
+    } else {
+      // Donde se cruzan las dos orillas corridas.
+      const a = add(p, scale(n1, d));
+      const b = add(p, scale(n2, d));
+      out.push(add(a, scale(before, cross(sub(b, a), after) / turn)));
+    }
+  }
+  return dedupe(out);
+}
+
+/** Un lado: la línea corrida hacia el lado del dron; si viene del otro lado, entra pasando el extremo. */
+function facadeLine(c, pr, spacing, standoff, from) {
+  const points = dedupe(c.boundary.map(pr.toLocal));
+  if (points.length < 2) return null;
+  const right = c.side === "right";
+  const path = CorridorPlanner.offset(points, right ? standoff : -standoff);
+  if (path.length < 2) return null;
+  // La cara queda a la derecha del dron si vuela por la izquierda de la línea, y al revés.
+  const headings = path.slice(1).map((b, i) => Geo.normalize(bearingOfV(sub(b, path[i])) + (right ? -90 : 90)));
+  let columns = spreadColumns(path, headings, spacing, false);
+  const reversed = from !== null && lengthV(sub(columns.at(-1).position, from)) < lengthV(sub(columns[0].position, from));
+  if (reversed) columns = columns.reverse();
+  const crosses = from !== null && points.slice(1).some((b, i) => segmentsCross(from, columns[0].position, points[i], b));
+  let entry = null;
+  if (crosses) {
+    // En la prolongación de la pared, a la misma distancia del extremo que el dron de la cara.
+    const end = reversed ? points.at(-1) : points[0];
+    const next = reversed ? points.at(-2) : points[1];
+    const out = sub(end, next);
+    entry = add(end, scale(scale(out, 1 / lengthV(out)), standoff));
+  }
+  return { columns, meters: pathLengthV(points), entry };
+}
+
+/** Redonda: columnas repartidas alrededor del círculo, mirando al centro. */
+function facadeCircle(c, pr, spacing, standoff, from) {
+  const radius = lengthV(pr.toLocal(c.boundary[1]));
+  if (radius < SAME_POINT) return null;
+  const flown = radius + standoff;
+  const count = Math.max(4, Math.ceil((2 * Math.PI * radius) / spacing - 1e-9));
+  const start = from && lengthV(from) > 1 ? bearingOfV(from) : 180;
+  const columns = Array.from({ length: count }, (_, k) => {
+    const bearing = Geo.normalize(start + (360 * k) / count);
+    return { position: scale(unitV(bearing), flown), heading: Geo.normalize(bearing + 180) };
+  });
+  return { columns, meters: 2 * Math.PI * radius, entry: null };
+}
+
+/** Con esquinas: el contorno corrido hacia afuera, con columnas en cada esquina, empezando por la más cercana. */
+function facadePolygon(c, pr, spacing, standoff, from) {
+  let points = dedupe(c.boundary.map(pr.toLocal));
+  if (points.length > 2 && lengthV(sub(points[0], points.at(-1))) < SAME_POINT) points = points.slice(0, -1);
+  if (points.length < 3) return null;
+  // Siempre en sentido antihorario (visto desde arriba): así "afuera" es a la derecha.
+  const area = points.reduce((sum, p, i) => sum + cross(p, points[(i + 1) % points.length]), 0) / 2;
+  if (Math.abs(area) < 1) return null;
+  if (area < 0) points = [...points].reverse();
+  const loop = facadeOutline(points, standoff);
+  // Mirando hacia adentro: a la izquierda del sentido en que va.
+  const headings = loop.map((a, i) => Geo.normalize(bearingOfV(sub(loop[(i + 1) % loop.length], a)) - 90));
+  let columns = spreadColumns([...loop, loop[0]], headings, spacing, true);
+  if (from) {
+    let nearest = 0;
+    columns.forEach((column, i) => {
+      if (lengthV(sub(column.position, from)) < lengthV(sub(columns[nearest].position, from))) nearest = i;
+    });
+    columns = [...columns.slice(nearest), ...columns.slice(0, nearest)];
+  }
+  return { columns, meters: pathLengthV([...points, points[0]]), entry: null };
+}
+
+/** Las paradas de una fachada, igual que FacadePlanner en Kotlin. */
+export const FacadePlanner = {
+  /** Subida y bajada entre filas (m/s). */
+  CLIMB_SPEED: 2,
+  /** Segundos para frenar y quedarse quieto en cada parada. */
+  SETTLE_SECONDS: 2,
+  /** Segundos para disparar y guardar la foto en cada parada. */
+  PHOTO_SECONDS: 3,
+  /** Más paradas que esto no caben en un vuelo (una cara marcada con el mapa muy alejado). */
+  MAX_STATIONS: 3000,
+
+  /** Ya tiene la cara marcada: dos puntos de una línea o de un círculo, o tres esquinas. */
+  hasShape: (c) => c.boundary.length >= (c.face === "polygon" ? 3 : 2),
+
+  /** Metros entre columnas y entre filas en la cara. */
+  spacing(c) {
+    if (c.spacing === "distance") return [Math.max(0.5, c.horizontalDistance), Math.max(0.5, c.verticalDistance)];
+    const [width, height] = MapPlanner.footprint(cameraFor(c), c.distance);
+    return [Math.max(0.5, width * (1 - c.horizontalOverlap / 100)), Math.max(0.5, height * (1 - c.verticalOverlap / 100))];
+  },
+
+  /** Distancia en el suelo: con la cámara inclinada, la distancia hasta la cara se mide por donde mira. */
+  standoff: (c) => Math.max(1, c.distance * Math.cos(rad(c.gimbalPitch))),
+
+  /** Las alturas de las filas, de la primera a la última. */
+  levels(c, vertical) {
+    const span = c.finalAltitude - c.altitude;
+    if (Math.abs(span) < 0.01) return [c.altitude];
+    const count = Math.max(1, Math.ceil(Math.abs(span) / vertical - 1e-9));
+    return Array.from({ length: count + 1 }, (_, i) => c.altitude + (span * i) / count);
+  },
+
+  /** `from`: de dónde viene el dron, para empezar en el extremo (o el punto del contorno) más cercano. */
+  plan(c, from = null) {
+    if (c.boundary.length < 2) return null;
+    const pr = projection(c.face === "circle" ? c.boundary[0] : Geo.centroid(c.boundary));
+    const [horizontal, vertical] = FacadePlanner.spacing(c);
+    const standoff = FacadePlanner.standoff(c);
+    const here = from ? pr.toLocal(from) : null;
+    const shape = c.face === "circle" ? facadeCircle : c.face === "polygon" ? facadePolygon : facadeLine;
+    const face = shape(c, pr, horizontal, standoff, here);
+    if (!face) return null;
+    const { columns } = face;
+    const closed = c.face !== "line";
+    const levels = FacadePlanner.levels(c, vertical);
+    if (columns.length * levels.length > FacadePlanner.MAX_STATIONS) return null;
+
+    const order = [];
+    if (c.pattern === "horizontal") {
+      levels.forEach((_, j) => {
+        // Alrededor de una estructura cada fila da la vuelta en el mismo sentido; en un lado, va y viene.
+        const cols = columns.map((_, i) => i);
+        if (!closed && j % 2 === 1) cols.reverse();
+        cols.forEach((i) => order.push([i, j]));
+      });
+    } else {
+      columns.forEach((_, i) => {
+        const rows = levels.map((_, j) => j);
+        if (i % 2 === 1) rows.reverse();
+        rows.forEach((j) => order.push([i, j]));
+      });
+    }
+    const stations = order.map(([i, j]) => ({ position: pr.toGeo(columns[i].position), altitude: levels[j], heading: columns[i].heading, column: i, row: j }));
+
+    let length = 0;
+    let seconds = 0;
+    if (face.entry) {
+      const h = lengthV(sub(columns[order[0][0]].position, face.entry));
+      length += h;
+      seconds += h / Math.max(0.5, c.speed);
+    }
+    for (let k = 1; k < order.length; k++) {
+      const [a, b] = [order[k - 1], order[k]];
+      const h = lengthV(sub(columns[b[0]].position, columns[a[0]].position));
+      const v = Math.abs(levels[b[1]] - levels[a[1]]);
+      length += h + v;
+      seconds += h / Math.max(0.5, c.speed) + v / FacadePlanner.CLIMB_SPEED + FacadePlanner.SETTLE_SECONDS;
+    }
+    const photos = c.captureMode === "photo";
+    if (photos) seconds += stations.length * FacadePlanner.PHOTO_SECONDS;
+    const entry = face.entry ? pr.toGeo(face.entry) : null;
+    const path = [];
+    for (const p of [...(entry ? [entry] : []), ...stations.map((s) => s.position)]) {
+      if (!path.length || Geo.distance(path.at(-1), p) > 0.01) path.push(p);
+    }
+    return {
+      stations,
+      entry,
+      path,
+      columns: columns.length,
+      rows: levels.length,
+      horizontalSpacing: horizontal,
+      verticalSpacing: vertical,
+      standoff,
+      faceMeters: face.meters,
+      photoCount: photos ? stations.length * shotsOf(c.photoType) : 0,
+      lengthMeters: length,
+      durationSeconds: seconds,
+      gsdCmPerPx: MapPlanner.gsd(cameraFor(c), c.distance),
+    };
+  },
+
+  /** El círculo de una estructura redonda, para dibujarla. */
+  circleOutline(c, steps = 48) {
+    if (c.face !== "circle" || c.boundary.length < 2) return [];
+    const pr = projection(c.boundary[0]);
+    const radius = lengthV(pr.toLocal(c.boundary[1]));
+    return Array.from({ length: steps }, (_, i) => pr.toGeo(scale(unitV((360 * i) / steps), radius)));
+  },
+
+  /** Lo más alto que vuela. */
+  highest: (c) => Math.max(c.altitude, c.finalAltitude),
+
+  /** Lo que se dibujó: la línea, el contorno o el círculo. */
+  points: (c) => (c.face === "circle" ? (FacadePlanner.circleOutline(c).length ? FacadePlanner.circleOutline(c) : c.boundary) : c.boundary),
+};
+
 export const OrbitPlanner = {
   /**
    * Rumbo desde el centro donde empieza: el que se escogió, o el punto del círculo más cercano a
@@ -926,6 +1199,41 @@ export function newPanoComponent(position = null) {
   };
 }
 
+/**
+ * Fachada, como el componente "Facade" de Dronelink: fotos frente a una cara vertical (un lado de
+ * un edificio) o alrededor de una estructura, a `distance` metros, en columnas o filas desde
+ * `altitude` hasta `finalAltitude`. El dron se detiene en cada foto mirando a la cara.
+ */
+export function newFacadeComponent(face = "line", boundary = []) {
+  return {
+    id: componentId(),
+    type: "facade",
+    name: null,
+    enabled: true,
+    face,
+    // Un lado: el borde de la cara. Redonda: [centro, un punto del borde]. Con esquinas: el contorno.
+    boundary,
+    side: "left",
+    distance: 10,
+    // Altura de la primera fila y de la última.
+    altitude: 10,
+    finalAltitude: 30,
+    pattern: "vertical",
+    horizontalOverlap: 50,
+    verticalOverlap: 50,
+    spacing: "overlap",
+    horizontalDistance: 5,
+    verticalDistance: 5,
+    // 0 = mirando de frente a la cara.
+    gimbalPitch: 0,
+    speed: 3,
+    captureMode: "photo",
+    photoSize: "48mp",
+    photoType: "single",
+    ...emptyCameraSettings(),
+  };
+}
+
 const NEW_COMPONENTS = {
   map: newMapComponent,
   corridor: newCorridorComponent,
@@ -933,6 +1241,7 @@ const NEW_COMPONENTS = {
   waypoints: newWaypointsComponent,
   photo: newPhotoComponent,
   pano: newPanoComponent,
+  facade: newFacadeComponent,
 };
 
 /** Si esta versión sabe editar y volar el componente (uno de una versión más nueva se guarda tal cual). */
@@ -981,6 +1290,13 @@ export function normalizeComponent(json) {
     if (!(component.minPhotoInterval > 0)) component.minPhotoInterval = base.minPhotoInterval;
     if (!Number.isFinite(component.captureSpeed)) component.captureSpeed = null;
   }
+  if (type === "facade") {
+    component.boundary = (Array.isArray(json.boundary) ? json.boundary : []).filter(isPoint);
+    component.altitude = finite(component.altitude, base.altitude);
+    component.finalAltitude = finite(json.finalAltitude, component.altitude);
+    for (const key of ["distance", "speed", "horizontalDistance", "verticalDistance"]) if (!(component[key] > 0)) component[key] = base[key];
+    component.gimbalPitch = finite(component.gimbalPitch, base.gimbalPitch);
+  }
   if (type === "photo" || type === "pano") {
     if (!isPoint(component.position)) component.position = null;
     component.heading = finite(component.heading, base.heading);
@@ -1004,6 +1320,7 @@ export function normalizeComponent(json) {
     headingReference: HEADING_REFERENCES,
     panoType: PANO_TYPES,
   };
+  if (type === "facade") Object.assign(choices, { face: FACADE_FACES, side: FACADE_SIDES, pattern: FACADE_PATTERNS });
   // En la foto y la panorámica el rumbo es un número.
   if (type === "map") choices.heading = MAP_HEADINGS;
   if (type === "orbit") choices.heading = ORBIT_HEADINGS;
@@ -1088,14 +1405,18 @@ export function copyComponent(component, gap = 10) {
     copy.points = copy.points.map((p, i) => ({ ...p, position: moved[i] }));
   } else if (copy.type === "photo" || copy.type === "pano") {
     copy.position = pr.toGeo({ x: gap, y: 0 });
+  } else if (copy.type === "facade") {
+    const xs = FacadePlanner.points(copy).map((p) => pr.toLocal(p).x);
+    copy.boundary = Geo.translate(copy.boundary, anchor, pr.toGeo({ x: Math.max(...xs) - Math.min(...xs) + 2 * FacadePlanner.standoff(copy) + gap, y: 0 }));
   }
   return copy;
 }
 
-const TYPE_NAMES = { map: "Mapa", corridor: "Corredor", orbit: "Órbita", waypoints: "Waypoints", photo: "Foto", pano: "Panorama" };
+const TYPE_NAMES = { map: "Mapa", corridor: "Corredor", orbit: "Órbita", waypoints: "Waypoints", photo: "Foto", pano: "Panorama", facade: "Fachada" };
 
-/** "Mapa", "Órbita"…: el nombre del tipo de componente. */
-export const typeName = (component) => TYPE_NAMES[component.type] ?? `Componente nuevo (${component.type})`;
+/** "Mapa", "Órbita"…: el nombre del tipo de componente. Alrededor de una estructura, la fachada es una inspección. */
+export const typeName = (component) =>
+  component.type === "facade" && component.face !== "line" ? "Inspección" : TYPE_NAMES[component.type] ?? `Componente nuevo (${component.type})`;
 
 export const componentName = (component) => component.name || typeName(component);
 
@@ -1113,6 +1434,9 @@ export function anchorOf(component) {
     case "photo":
     case "pano":
       return component.position;
+    case "facade":
+      if (!component.boundary.length) return null;
+      return component.face === "circle" ? component.boundary[0] : Geo.centroid(component.boundary);
     default:
       return null;
   }
@@ -1136,6 +1460,11 @@ export function autoTakeoff(component) {
   if (component.type === "orbit") {
     const radius = Math.max(component.radius, component.finalRadius ?? 0);
     return pr.toGeo({ x: 0, y: -(radius + AUTO_TAKEOFF_METERS) });
+  }
+  if (component.type === "facade") {
+    // Al sur de la estructura y de por donde vuela alrededor.
+    const south = Math.min(...FacadePlanner.points(component).map((p) => pr.toLocal(p).y)) - FacadePlanner.standoff(component);
+    return pr.toGeo({ x: 0, y: south - AUTO_TAKEOFF_METERS });
   }
   // Al sur del primer punto, lo bastante lejos para que la H no lo tape.
   return pr.toGeo({ x: 0, y: -POINT_TAKEOFF_METERS });
@@ -1166,6 +1495,8 @@ export function componentPlan(component, from = null) {
       return PointsPlanner.photo(component);
     case "pano":
       return PointsPlanner.pano(component);
+    case "facade":
+      return FacadePlanner.plan(component, from);
     default:
       return null;
   }
@@ -1179,6 +1510,8 @@ export const startAltitude = (component) =>
 export function endAltitude(component) {
   if (component.type === "orbit") return component.finalAltitude ?? component.altitude;
   if (component.type === "waypoints") return component.points.at(-1)?.altitude ?? component.altitude;
+  // En columnas, termina arriba o abajo según cuántas columnas haya.
+  if (component.type === "facade") return FacadePlanner.plan(component)?.stations.at(-1)?.altitude ?? component.altitude;
   return component.altitude;
 }
 
@@ -1250,6 +1583,8 @@ export function componentPoints(component) {
     case "photo":
     case "pano":
       return component.position ? [component.position] : [];
+    case "facade":
+      return FacadePlanner.points(component);
     default:
       return [];
   }
@@ -1479,6 +1814,17 @@ function componentDetails(component) {
       `${passes} ${passes === 1 ? "pasada" : "pasadas"}`,
     ].join(" · ");
   }
+  if (component.type === "facade") {
+    if (!FacadePlanner.hasShape(component)) return `${num(component.altitude)} m · ${component.face === "line" ? "sin cara" : "sin estructura"}`;
+    const altitude =
+      component.finalAltitude !== component.altitude ? `${num(component.altitude)} → ${num(component.finalAltitude)} m` : `${num(component.altitude)} m`;
+    const spacing =
+      component.spacing === "distance"
+        ? `${num(component.horizontalDistance, 1)} × ${num(component.verticalDistance, 1)} m`
+        : `${num(component.horizontalOverlap)} % · ${num(component.verticalOverlap)} %`;
+    const pattern = FACADE_PATTERNS.find(([k]) => k === component.pattern)?.[1] ?? "";
+    return `${altitude} · a ${num(component.distance)} m · ${pattern} · ${spacing}`;
+  }
   if (component.type === "map") {
     if (component.boundary.length < 3) return `${num(component.altitude)} m · sin área`;
     const area = Geo.area(component.boundary) / 10000;
@@ -1547,11 +1893,38 @@ export const FlightPreview = {
       const { component, result: route } = item;
       if (!component.enabled || !route) continue;
       const label = `${item.number}. ${componentName(component)}`;
-      const altitudes = routeAltitudes(component, route.path);
-      const points = route.path.map((position, i) => ({ position, altitude: altitudes[i] }));
+      const points = routePoints(component, route);
       if (here) transit(here, points[0], `Hacia ${label}`);
       const info = { label, kind: "route", component };
-      if (points.length === 1) {
+      if (component.type === "facade") {
+        // De parada en parada, mirando a la cara, con la foto quieto en cada una.
+        const speed = Math.max(0.5, component.speed);
+        const shots = component.captureMode === "photo" ? shotsOf(component.photoType) : 0;
+        const moves = [];
+        let taken = photos;
+        let previous = null;
+        if (route.entry) {
+          moves.push([points[0], points[1], Geo.distance(points[0].position, points[1].position) / speed, { ...info, photos: [taken, taken], facing: route.stations[0].heading }]);
+        }
+        route.stations.forEach((station) => {
+          const at = { position: station.position, altitude: station.altitude };
+          if (previous) {
+            const seconds =
+              Geo.distance(previous.position, at.position) / speed +
+              Math.abs(at.altitude - previous.altitude) / FacadePlanner.CLIMB_SPEED +
+              FacadePlanner.SETTLE_SECONDS;
+            moves.push([previous, at, seconds, { ...info, photos: [taken, taken], facing: station.heading }]);
+          }
+          if (shots) {
+            moves.push([at, at, FacadePlanner.PHOTO_SECONDS, { ...info, kind: "shot", photos: [taken, taken + shots], facing: station.heading }]);
+            taken += shots;
+          }
+          previous = at;
+        });
+        // Las distancias en el mapa difieren en milímetros de las del plano: que sume lo estimado.
+        const total = moves.reduce((sum, move) => sum + move[2], 0);
+        for (const [from, to, seconds, details] of moves) push(from, to, (seconds * route.durationSeconds) / (total || 1), details);
+      } else if (points.length === 1) {
         // Una foto o una panorámica: quieto en el punto (la panorámica da la vuelta).
         push(points[0], points[0], route.durationSeconds, { ...info, kind: "shot", photos: [photos, photos + route.photoCount] });
       } else {
@@ -1582,7 +1955,8 @@ export const FlightPreview = {
     let heading = 0;
     for (const segment of segments) {
       const c = segment.component;
-      if (segment.kind === "shot") heading = c.type === "photo" || c.type === "pano" ? c.heading : heading;
+      if (segment.facing !== undefined) heading = segment.facing;
+      else if (segment.kind === "shot") heading = c.type === "photo" || c.type === "pano" ? c.heading : heading;
       else if (Geo.distance(segment.from.position, segment.to.position) > 0.5) heading = Geo.bearing(segment.from.position, segment.to.position);
       segment.heading = heading;
       // La panorámica (sin ser angular o vertical) gira entera.
@@ -1747,6 +2121,19 @@ const xmlEscape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&
 const cdata = (text) => `<![CDATA[${String(text).replaceAll("]]>", "]]]]><![CDATA[>")}]]>`;
 const kmlCoords = (points) => points.map(({ position: [lat, lon], altitude }) => `${round7(lon)},${round7(lat)},${Math.round(altitude * 10) / 10}`).join(" ");
 
+/**
+ * Los puntos de la ruta de un componente con su altura sobre el despegue (sin seguir el terreno).
+ * La fachada sube y baja en cada columna: van todas sus paradas.
+ */
+function routePoints(component, route) {
+  if (component.type === "facade") {
+    const stops = route.stations.map((s) => ({ position: s.position, altitude: s.altitude }));
+    return route.entry ? [{ position: route.entry, altitude: stops[0].altitude }, ...stops] : stops;
+  }
+  const altitudes = routeAltitudes(component, route.path);
+  return route.path.map((position, i) => ({ position, altitude: altitudes[i] }));
+}
+
 /** La altura sobre el despegue de cada punto de la ruta de un componente (sin seguir el terreno). */
 function routeAltitudes(component, path) {
   if (component.type === "waypoints" && component.points.length === path.length) return component.points.map((p) => p.altitude);
@@ -1784,8 +2171,7 @@ export function exportKml(plan, ground = null) {
     if (ground && TerrainFollow.follows(component)) {
       points = TerrainFollow.alongRoute(ground, route.path, TerrainFollow.aglAlong(component, route.path)).map((s) => ({ position: s.position, altitude: base + s.altitude }));
     } else {
-      const altitudes = routeAltitudes(component, route.path);
-      points = route.path.map((position, i) => ({ position, altitude: base + altitudes[i] }));
+      points = routePoints(component, route).map((p) => ({ ...p, altitude: base + p.altitude }));
     }
     const start = points[0];
     const from = previous ?? { position: result.takeoff ?? start.position, altitude: base };
@@ -1803,6 +2189,9 @@ export function exportKml(plan, ground = null) {
       const outline = CorridorPlanner.outline(component);
       const shape = outline.length ? [...outline, outline[0]] : component.path;
       placemark("areas", `${name} · franja`, "area", outline.length ? `<Polygon><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(shape.map((position) => ({ position, altitude: 0 })))}</coordinates></LinearRing></outerBoundaryIs></Polygon>` : `<LineString><tessellate>1</tessellate><coordinates>${kmlCoords(shape.map((position) => ({ position, altitude: 0 })))}</coordinates></LineString>`);
+    } else if (component.type === "facade") {
+      const shape = FacadePlanner.points(component).map((position) => ({ position, altitude: 0 }));
+      placemark("areas", `${name} · ${component.face === "line" ? "pared" : "estructura"}`, "area", component.face === "line" ? `<LineString><tessellate>1</tessellate><coordinates>${kmlCoords(shape)}</coordinates></LineString>` : `<Polygon><outerBoundaryIs><LinearRing><coordinates>${kmlCoords([...shape, shape[0]])}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
     } else if (component.type === "orbit") {
       placemark("points", `${name} · centro`, "point", `<Point><coordinates>${kmlCoords([{ position: component.center, altitude: 0 }])}</coordinates></Point>`);
     } else if (component.type === "waypoints") {

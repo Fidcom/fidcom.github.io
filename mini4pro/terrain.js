@@ -1,6 +1,6 @@
 // La altura del suelo para seguir el terreno: los mosaicos Terrarium de AWS (libres, sin clave),
 // leídos en el navegador. Los mismos datos que baja la app para volar.
-import { TerrariumTiles, tileTerrain } from "./planner.js?v=20261029a";
+import { TerrariumTiles, tileTerrain } from "./planner.js?v=20261029b";
 
 /** Alrededor de la misión también hace falta el suelo, por los tránsitos y el despegue. */
 const MARGIN_METERS = 500;
