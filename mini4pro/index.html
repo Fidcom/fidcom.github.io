@@ -142,6 +142,7 @@
       <div class="tool-group">
         <button id="tool-fit" class="tool" type="button" title="Ver toda la misión"><svg><use href="#i-fit" /></svg></button>
         <button id="tool-locate" class="tool" type="button" title="Ir a mi ubicación"><svg><use href="#i-gps" /></svg></button>
+        <button id="tool-photos" class="tool" type="button" title="Ver dónde se toma cada foto" aria-label="Puntos de las fotos"><svg><use href="#i-camera" /></svg></button>
         <button id="tool-layers" class="tool" type="button" title="Capas del mapa"><svg><use href="#i-labels" /></svg></button>
       </div>
       <div id="layer-menu" class="layer-menu" hidden>
@@ -168,6 +169,7 @@
         <div class="preview-times"><span id="preview-time">0:00</span><span id="preview-total">0:00</span></div>
       </div>
       <div class="preview-speed segmented" role="group" aria-label="Velocidad de la vista previa">
+        <button type="button" data-speed="1">×1</button>
         <button type="button" data-speed="10">×10</button>
         <button type="button" data-speed="30">×30</button>
         <button type="button" data-speed="100">×100</button>
@@ -223,6 +225,6 @@
     </dialog>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script type="module" src="app.js?v=20261029e"></script>
+    <script type="module" src="app.js?v=20261029f"></script>
   </body>
 </html>

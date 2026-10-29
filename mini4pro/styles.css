@@ -1798,6 +1798,44 @@ body.previewing .zone-warning {
   display: none;
 }
 
+/* El destello de cada foto: un anillo amarillo que se abre desde el dron. */
+.preview-drone .flash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  border: 3px solid #ffd60a;
+  opacity: 0;
+}
+
+.preview-drone.shot .flash {
+  animation: preview-shot 0.45s ease-out;
+}
+
+.preview-drone.shot .body {
+  animation: preview-shot-body 0.45s ease-out;
+}
+
+@keyframes preview-shot {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+@keyframes preview-shot-body {
+  from {
+    background: #ffd60a;
+  }
+}
+
 .preview-drone .body {
   position: absolute;
   left: 50%;
