@@ -11,8 +11,12 @@ import {
   MINI_4_PRO_12MP,
   OrbitPlanner,
   PanoPlan,
+  PhotoPace,
+  PhotoPoints,
   PlanPlanner,
   PointsPlanner,
+  captureInterval,
+  minPhotoInterval,
   componentName,
   componentPoints,
   copyComponent,
@@ -90,6 +94,127 @@ test("la velocidad la limita el tiempo entre fotos", () => {
   const plan = MapPlanner.plan(map({ altitude: 10, frontOverlap: 75, minPhotoInterval: 5, maxSpeed: 8.94 }));
   near(plan.photoSpacing, 2.69, 0.02);
   near(plan.speed, 0.54, 0.01);
+});
+
+test("la cámara pone el tiempo mínimo entre fotos: 5 s en 48 MP y 2 s en 12 MP", () => {
+  assert.equal(minPhotoInterval("48mp"), 5);
+  assert.equal(minPhotoInterval("12mp"), 2);
+  const fast = map({ altitude: 40, maxSpeed: 15, minPhotoInterval: 1 });
+  const at48 = MapPlanner.plan(fast);
+  near(at48.photoSpacing / at48.speed, 5, 1e-9);
+  const at12 = MapPlanner.plan({ ...fast, photoSize: "12mp" });
+  near(at12.photoSpacing / at12.speed, 2, 1e-9);
+  const slow = MapPlanner.plan({ ...fast, minPhotoInterval: 7 });
+  near(slow.photoSpacing / slow.speed, 7, 1e-9);
+
+  // Órbita y waypoints: una foto cada 1 s en 48 MP sale cada 5 s.
+  const orbit = { ...newOrbitComponent(origin), radius: 30, speed: 4, captureMode: "photo", photoInterval: 1 };
+  const orbitPlan = OrbitPlanner.plan(orbit);
+  assert.equal(captureInterval(orbit), 5);
+  assert.equal(orbitPlan.photoCount, Math.floor(orbitPlan.durationSeconds / 5) + 1);
+  // 102 m a 5 m/s son 20.4 s: fotos a los 0, 5, 10, 15 y 20 s (en 12 MP, cada 2 s).
+  const tour = { ...newWaypointsComponent([newWaypoint(origin, 20), newWaypoint(pr.toGeo({ x: 102, y: 0 }), 20)]), speed: 5, captureMode: "photo", photoInterval: 1 };
+  assert.equal(PointsPlanner.waypoints(tour).photoCount, 5);
+  assert.equal(PointsPlanner.waypoints({ ...tour, photoSize: "12mp" }).photoCount, 11);
+});
+
+test("si la cámara no alcanza ni volando lento, se detiene en cada foto", () => {
+  const slow = map({ altitude: 10, frontOverlap: 90 });
+  const plan = MapPlanner.plan(slow);
+  assert.ok(plan.cameraStops);
+  assert.equal(plan.captureSpeed, 0);
+  near(plan.speed, PhotoPace.MIN_SPEED, 1e-9);
+  assert.ok(plan.durationSeconds >= plan.positions * 5);
+  const fast = MapPlanner.plan({ ...slow, photoSize: "12mp", minPhotoInterval: 2 });
+  assert.ok(!fast.cameraStops);
+  assert.equal(fast.captureSpeed, null);
+  near(fast.speed, 0.54, 0.01);
+  const byTime = MapPlanner.plan({ ...slow, capturePriority: "time" });
+  assert.ok(byTime.cameraStops && !byTime.byTime && byTime.runUp === 0);
+});
+
+/** La misma misión que PhotoPointsTest.kt: los dos tienen que dar los mismos números. */
+const photosFixture = {
+  version: 2,
+  id: "fotos",
+  name: "Fotos",
+  finishAction: "HOVER",
+  transitSpeed: 8,
+  takeoff: [18.1795, -65.8205],
+  components: [
+    { id: "m", type: "map", boundary: [[18.18, -65.82], [18.18, -65.8196], [18.1803, -65.8196], [18.1803, -65.82]], altitude: 10, frontOverlap: 90, sideOverlap: 70 },
+    {
+      id: "t",
+      type: "map",
+      boundary: [[18.1806, -65.82], [18.1806, -65.8192], [18.1812, -65.8192], [18.1812, -65.82]],
+      altitude: 30,
+      capturePriority: "time",
+      photoSize: "12mp",
+      minPhotoInterval: 1,
+      maxSpeed: 10,
+    },
+    { id: "c", type: "corridor", path: [[18.1815, -65.82], [18.1818, -65.8196], [18.1822, -65.8195]], width: 0, altitude: 30, minPhotoInterval: 1, photoType: "aeb3" },
+    { id: "o", type: "orbit", center: [18.1805, -65.819], radius: 20, speed: 4, captureMode: "photo", photoInterval: 1 },
+    {
+      id: "w",
+      type: "waypoints",
+      speed: 5,
+      captureMode: "photo",
+      photoInterval: 1,
+      points: [
+        { position: [18.1808, -65.8185], altitude: 20, action: "photo" },
+        { position: [18.181, -65.8183], altitude: 30 },
+        { position: [18.1812, -65.8186], altitude: 25, action: "photo" },
+      ],
+    },
+    { id: "p", type: "pano", position: [18.1813, -65.819], panoType: "vertical" },
+  ],
+};
+
+test("dónde se toma cada foto: los mismos puntos y tiempos que en el teléfono", () => {
+  const plan = normalizePlan(structuredClone(photosFixture));
+  const result = PlanPlanner.plan(plan);
+  near(result.durationSeconds, 2135.664379, 1e-5);
+  assert.equal(result.photoCount, 428);
+  // [duración, fotos, puntos, primero, último, metros hasta el último]: lo que da PhotoPointsTest.kt.
+  const expected = [
+    [1717.751466, 310, 310, [18.18, -65.8199833], [18.18000933, -65.8196167], 371.276486],
+    [190.733923, 63, 63, [18.18060008, -65.8199666], [18.18118143, -65.8192334], 647.33781],
+    [69.601707, 39, 13, [18.1815, -65.82], [18.18217735, -65.81950566], 96.964286],
+    [31.370673, 7, 7, [18.18067303, -65.81905089], [18.18065337, -65.81909831], 120],
+    [28.878572, 6, 6, [18.1808, -65.8185], [18.1812, -65.8186], 69.392862],
+    [15, 3, 1, [18.1813, -65.819], [18.1813, -65.819], 0],
+  ];
+  result.items.forEach((item, i) => {
+    const [duration, photos, count, first, last, lastAlong] = expected[i];
+    const name = item.component.id;
+    near(item.result.durationSeconds, duration, 1e-5, name);
+    assert.equal(item.result.photoCount, photos, name);
+    const points = PhotoPoints.of(item.component, item.result);
+    assert.equal(points.length, count, name);
+    assert.equal(points.reduce((sum, p) => sum + p.shots, 0), photos, name);
+    near(points[0].position[0], first[0], 1e-8, name);
+    near(points[0].position[1], first[1], 1e-8, name);
+    near(points.at(-1).position[0], last[0], 1e-8, name);
+    near(points.at(-1).position[1], last[1], 1e-8, name);
+    near(points.at(-1).along, lastAlong, 1e-5, name);
+  });
+  const stops = result.items[0].result;
+  assert.ok(stops.cameraStops);
+  near(stops.speed, 0.3, 1e-9);
+  const byTime = result.items[1].result;
+  assert.ok(byTime.byTime);
+  near(byTime.photoSpacing / byTime.speed, 2, 1e-9);
+
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, 2135.664379, 1e-5);
+  assert.equal(timeline.shots.length, 428);
+  near(timeline.shots[10].time, 62.780103, 1e-5);
+  near(timeline.shots[10].position[0], 18.18009689, 1e-8);
+  near(timeline.shots[10].position[1], -65.8199833, 1e-8);
+  near(timeline.shots[60].time, 330.984615, 1e-5);
+  assert.equal(FlightPreview.photosBy(timeline, 62.780103), 11);
+  assert.equal(FlightPreview.photosBy(timeline, 62.78), 10);
 });
 
 test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () => {
@@ -475,7 +600,8 @@ test("waypoints, foto y panorámica dan el mismo tiempo y las mismas fotos que e
   const plan = normalizePlan(structuredClone(pointsFixture));
   const result = PlanPlanner.plan(plan);
   // Los números que da PlanPlanner.kt con esta misma misión.
-  near(result.durationSeconds, 186.63, 0.01);
+  // La foto y la panorámica en 48 MP: 5 s por foto, lo que necesita la cámara.
+  near(result.durationSeconds, 192.13, 0.01);
   near(result.lengthMeters, 581.2151, 0.01);
   assert.equal(result.photoCount, 23);
   assert.equal(result.flown, 3);
@@ -484,7 +610,7 @@ test("waypoints, foto y panorámica dan el mismo tiempo y las mismas fotos que e
   assert.equal(waypoints.result.photoCount, 11);
   near(waypoints.approach.durationSeconds, 14.5862, 0.001);
   assert.equal(photo.result.photoCount, 3);
-  near(pano.result.durationSeconds, 40.5, 0.001);
+  near(pano.result.durationSeconds, 45, 0.001);
   assert.equal(future.result, null);
 });
 
@@ -571,6 +697,7 @@ const corridorFixture = {
       ],
       width: 60,
       minPhotoInterval: 2,
+      photoSize: "12mp",
       captureSpeed: 1,
       photoType: "aeb3",
     },
@@ -884,10 +1011,10 @@ test("zonas: los mismos tránsitos, desvíos y avisos que en el teléfono", () =
   const plan = normalizePlan(structuredClone(zonesFixture));
   const result = PlanPlanner.plan(plan);
   assert.equal(result.flown, 3);
-  near(result.durationSeconds, 194.156033, 1e-5);
+  near(result.durationSeconds, 197.156033, 1e-5);
   near(result.lengthMeters, 975.874268, 1e-5);
   assert.equal(result.photoCount, 3);
-  near(result.items[3].result.durationSeconds, 25.833333, 1e-5);
+  near(result.items[3].result.durationSeconds, 27.833333, 1e-5);
   assert.deepEqual(
     result.transits.map((t) => t.via.length),
     [2, 1, 0, 2],
@@ -969,7 +1096,8 @@ test("comandos: tiempo, fotos, alturas y sin punto donde terminó lo anterior", 
     altitude: 20,
   };
   const route = PointsPlanner.commands(commands);
-  near(route.durationSeconds, 2 + 4 + 15 / 3 + 4 + 3, 1e-9);
+  // En 48 MP la cámara necesita 5 s entre fotos.
+  near(route.durationSeconds, 2 + 5 + 15 / 3 + 5 + 3, 1e-9);
   assert.equal(route.photoCount, 2);
   assert.equal(endAltitude(commands), 35);
   assert.equal(commandsCaptureMode(commands), "photo");
