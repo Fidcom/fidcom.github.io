@@ -85,9 +85,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261029f";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261029f";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261029f";
+} from "./planner.js?v=20261030a";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030a";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030a";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -2165,7 +2165,9 @@ $("component-done").addEventListener("click", () => showView(null));
 function buildMapParams(params, c) {
   const plan = () => selectedItem()?.result ?? MapPlanner.plan(c);
   const photos = c.captureMode === "photo";
-  const byDistance = photos && c.capturePriority !== "time";
+  // Las fotos en los cruces van siempre por distancia.
+  const crossings = c.pattern === "grid" && c.gridPhotos === true;
+  const byDistance = photos && (c.capturePriority !== "time" || crossings);
 
   section(params, "VUELO");
   terrainToggle(params, c);
@@ -2198,19 +2200,21 @@ function buildMapParams(params, c) {
   choiceParam(params, c, { key: "captureMode", label: "Durante las líneas", options: CAPTURE_MODES, rebuild: true });
   if (photos) {
     photoSizeParam(params, c, "minPhotoInterval");
-    choiceParam(params, c, {
-      key: "capturePriority",
-      label: "Tomar las fotos por",
-      options: CAPTURE_PRIORITIES,
-      rebuild: true,
-      help: () =>
-        c.capturePriority === "time"
-          ? "Una foto cada cierto tiempo a velocidad fija; arranca antes del área para tomar velocidad"
-          : "La foto se toma al llegar a cada punto: traslape exacto aunque haya viento",
-    });
+    if (!crossings) {
+      choiceParam(params, c, {
+        key: "capturePriority",
+        label: "Tomar las fotos por",
+        options: CAPTURE_PRIORITIES,
+        rebuild: true,
+        help: () =>
+          c.capturePriority === "time"
+            ? "Una foto cada cierto tiempo a velocidad fija; arranca antes del área para tomar velocidad"
+            : "La foto se toma al llegar a cada punto: traslape exacto aunque haya viento",
+      });
+    }
     photoIntervalParam(params, c, {
       key: "minPhotoInterval",
-      label: c.capturePriority === "time" ? "Foto cada" : "Tiempo mínimo entre fotos",
+      label: byDistance ? "Tiempo mínimo entre fotos" : "Foto cada",
       help: () => `En ${c.photoSize === "12mp" ? "12 MP no menos de 2 s" : "48 MP no menos de 5 s"}: lo que la cámara necesita entre una foto y otra`,
     });
     if (byDistance) {
@@ -2294,6 +2298,14 @@ function buildMapParams(params, c) {
           "Una pasada mirando abajo y cuatro con la cámara inclinada hacia cada lado, para modelos 3D con las paredes. Unas 5 veces el tiempo: usa la reanudación al cambiar la batería",
       })[c.pattern],
   });
+  if (c.pattern === "grid" && photos) {
+    toggleParam(params, c, {
+      key: "gridPhotos",
+      label: "Fotos en los cruces",
+      rebuild: true,
+      help: "Una foto en cada cruce de líneas y otras repartidas entre cruce y cruce (al menos a la mitad); cada cruce una sola vez, sin fotos casi en el mismo sitio",
+    });
+  }
   if (c.pattern === "oblique") {
     numberParam(params, c, {
       key: "obliquePitch",
