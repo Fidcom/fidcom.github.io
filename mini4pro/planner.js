@@ -331,6 +331,30 @@ export const MotionTimes = {
     return (peak - v0) / a + (down - up) / peak + (peak - Math.sqrt(Math.max(0, peak * peak - 2 * a * (d - down)))) / a;
   },
 
+  /**
+   * Dónde va y a qué velocidad a los `time` segundos de un tramo recto de `length` m a `speed` m/s
+   * que empieza y acaba quieto (como `straight`): [metros desde el inicio, m/s].
+   */
+  along(time, length, speed) {
+    if (length <= 0) return [0, 0];
+    const a = MotionTimes.ACCELERATION;
+    const v = Math.min(MotionTimes.MAX_SPEED, Math.max(0.3, speed));
+    const v0 = Math.min(MotionTimes.START_SPEED, v);
+    const peak = length >= (2 * v * v - v0 * v0) / (2 * a) ? v : Math.sqrt((2 * a * length + v0 * v0) / 2);
+    const up = (peak * peak - v0 * v0) / (2 * a);
+    const down = length - (peak * peak) / (2 * a);
+    const accelerating = (peak - v0) / a;
+    const braking = accelerating + (down - up) / peak;
+    const t = Math.max(0, time);
+    if (t <= accelerating) return [v0 * t + (a * t * t) / 2, v0 + a * t];
+    if (t <= braking) return [up + peak * (t - accelerating), peak];
+    if (t <= braking + peak / a) {
+      const s = t - braking;
+      return [down + peak * s - (a * s * s) / 2, peak - a * s];
+    }
+    return [length, 0];
+  },
+
   /** Girar `degrees` grados quieto (los giros pequeños los hace volando: 0). */
   turn: (degrees) => (Math.abs(degrees) <= MotionTimes.TURN_IN_FLIGHT ? 0 : Math.abs(degrees) / MotionTimes.YAW_RATE + MotionTimes.TURN_EXTRA),
 
@@ -435,8 +459,8 @@ export const MapPlanner = {
   ],
 
   /**
-   * Ángulo entre el frente del dron (y de la cámara) y la línea de vuelo con rumbo `direction`:
-   * 0 = mira hacia adelante, ±90 = de lado.
+   * Ángulo entre el frente del dron (y de la cámara) y las líneas con rumbo `direction`: 0 = mira
+   * hacia adelante, ±90 = de lado.
    */
   headingOffset(mission, direction) {
     switch (mission.heading) {
@@ -451,13 +475,31 @@ export const MapPlanner = {
     }
   },
 
-  /** Separación entre líneas y entre fotos para líneas con rumbo `direction`. */
+  /** Si el dron va de lado en las líneas con rumbo `direction`: la foto queda girada respecto a ellas. */
+  sideways(mission, direction = mission.direction) {
+    const offset = Math.abs(Geo.normalize(MapPlanner.headingOffset(mission, direction)) % 180);
+    return offset > 45 && offset < 135;
+  },
+
+  /**
+   * El traslape lateral y frontal (en %) con que de verdad salen las fotos de la primera pasada de
+   * `plan`: con el dron de lado la foto va girada respecto a las líneas. Devuelve [lateral, frontal].
+   */
+  flownOverlap(mission, plan) {
+    let [across, along] = MapPlanner.footprint(cameraFor(mission), mission.altitude);
+    if (MapPlanner.sideways(mission)) [across, along] = [along, across];
+    return [100 * (1 - plan.lineSpacing / across), 100 * (1 - plan.photoSpacing / along)];
+  },
+
+  /**
+   * Separación entre líneas con rumbo `direction` y entre fotos. "El dron mira" no cambia las líneas
+   * (se separan con la foto mirando hacia adelante), salvo con `headingSpacing`.
+   */
   spacing(mission, direction) {
     if (mission.spacing === "distance") return { line: mission.sideDistance, photo: mission.frontDistance };
     let [footWidth, footHeight] = MapPlanner.footprint(cameraFor(mission), mission.altitude);
-    // Con el dron de lado, el lado largo de la foto queda a lo largo de la línea.
-    const offset = Math.abs(Geo.normalize(MapPlanner.headingOffset(mission, direction)) % 180);
-    if (offset > 45 && offset < 135) [footWidth, footHeight] = [footHeight, footWidth];
+    // Separadas según el rumbo: con el dron de lado, el lado largo de la foto queda a lo largo de la línea.
+    if (mission.headingSpacing === true && MapPlanner.sideways(mission, direction)) [footWidth, footHeight] = [footHeight, footWidth];
     return {
       line: Math.max(1, footWidth * (1 - mission.sideOverlap / 100)),
       photo: Math.max(0.5, footHeight * (1 - mission.frontOverlap / 100)),
@@ -604,7 +646,28 @@ export const MapPlanner = {
       segmentSeconds: timing.segments,
       // Cuándo toma cada foto, en segundos desde que empieza el mapa, en el orden de PhotoPoints.
       photoSeconds: timing.photos,
+      // Los segundos que gira quieto antes de cada tramo (incluidos en segmentSeconds).
+      turnSeconds: timing.turns,
     };
+  },
+
+  /**
+   * Hacia dónde mira el dron en cada tramo de `legs`, según "El dron mira": hacia adelante gira en
+   * cada línea; a un lado o con otro ángulo no gira entre líneas, con el rumbo medido desde la
+   * primera línea de la pasada (o desde el norte). Con patrón cruzado gira una vez, al empezar la
+   * segunda pasada. Los tramos oblicuos traen su propio rumbo.
+   */
+  headings(mission, legs) {
+    const firstLine = new Map();
+    return legs.map((leg) => {
+      const bearing = Geo.bearing(leg.start, leg.end);
+      // Con patrón cruzado, los tramos de la segunda pasada van a 90° de la dirección.
+      const off = Math.abs(angleDifference(bearing % 180, mission.direction % 180));
+      const secondPass = Math.min(off, 180 - off) > 45;
+      if (leg.heading !== null && leg.heading !== undefined) return leg.heading;
+      if (!firstLine.has(secondPass)) firstLine.set(secondPass, bearing);
+      return mapHeading(mission, bearing, firstLine.get(secondPass));
+    });
   },
 
   /** Dónde toma las fotos el piloto automático en `leg`, en metros desde su inicio. */
@@ -621,22 +684,22 @@ export const MapPlanner = {
    * arranca y frena; antes de cada uno gira quieto hacia su rumbo (de lado a lado de una línea a la
    * siguiente da media vuelta) y vuela el cambio de línea a la velocidad máxima; deteniéndose en las
    * fotos, entre una y otra pasa al menos el tiempo mínimo de la cámara. `arrival`: el rumbo con el
-   * que llega al primer tramo (null = ya mirando hacia él). Devuelve {segments, photos}: los
-   * segundos de cada parte de `path` y cuándo toma cada foto.
+   * que llega al primer tramo (null = ya mirando hacia él). Devuelve {segments, photos, turns}: los
+   * segundos de cada parte de `path`, cuándo toma cada foto y cuánto gira quieto antes de cada tramo.
    */
   timing(mission, plan, arrival) {
     const segments = [];
     const photos = [];
+    const turns = [];
     let clock = 0;
     let heading = arrival;
     const interval = captureInterval(mission);
     const stops = plan.captureSpeed === 0;
+    const headings = MapPlanner.headings(mission, plan.legs);
     plan.legs.forEach((leg, i) => {
-      const bearing = Geo.bearing(leg.start, leg.end);
-      const off = Math.abs(angleDifference(bearing % 180, mission.direction % 180));
-      const secondPass = Math.min(off, 180 - off) > 45;
-      const legHeading = leg.heading ?? mapHeading(mission, bearing, secondPass ? mission.direction + 90 : mission.direction);
+      const legHeading = headings[i];
       let seconds = heading === null || heading === undefined ? 0 : MotionTimes.turn(angleDifference(heading, legHeading));
+      turns.push(seconds);
       heading = legHeading;
       if (i > 0) {
         const gap = Geo.distance(plan.legs[i - 1].end, leg.start);
@@ -667,7 +730,7 @@ export const MapPlanner = {
       segments.push(seconds);
       clock += seconds;
     });
-    return { segments, photos };
+    return { segments, photos, turns };
   },
 
   /** Rumbo del lado más largo (0 a 179°): volar paralelo a él da menos líneas y giros. */
@@ -782,15 +845,19 @@ export const MapPlanner = {
   },
 };
 
-/** Hacia dónde mira el dron en un tramo del mapa con rumbo `legBearing`, en una pasada con rumbo `passDirection` (FlightCompiler.mapHeading). */
-function mapHeading(mission, legBearing, passDirection) {
+/**
+ * Hacia dónde mira el dron en un tramo del mapa con rumbo `legBearing`, según "El dron mira": solo
+ * hacia adelante sigue el tramo; los demás se miden desde `firstLine`, el rumbo de la primera línea
+ * de la pasada, y no giran entre líneas (FlightCompiler.mapHeading).
+ */
+export function mapHeading(mission, legBearing, firstLine) {
   switch (mission.heading) {
     case "left":
-      return Geo.normalize(passDirection - 90);
+      return Geo.normalize(firstLine - 90);
     case "right":
-      return Geo.normalize(passDirection + 90);
+      return Geo.normalize(firstLine + 90);
     case "custom":
-      return Geo.normalize(mission.headingReference === "path" ? legBearing + mission.headingAngle : mission.headingAngle);
+      return Geo.normalize(mission.headingReference === "path" ? firstLine + mission.headingAngle : mission.headingAngle);
     default:
       return Geo.normalize(legBearing);
   }
@@ -1489,6 +1556,8 @@ export function newMapComponent(boundary = []) {
     heading: "forward",
     headingAngle: 0,
     headingReference: "north",
+    // Con el dron de lado, separar las líneas para la foto girada (mantiene el traslape con más líneas).
+    headingSpacing: false,
     verifyFileCreated: false,
     highWindTolerance: false,
     ...emptyCameraSettings(),
@@ -1748,6 +1817,7 @@ export function normalizeComponent(json) {
   if (type === "map") {
     component.obliquePitch = finite(component.obliquePitch, base.obliquePitch);
     component.gridPhotos = component.gridPhotos === true;
+    component.headingSpacing = component.headingSpacing === true;
   }
   if (type === "waypoints") {
     component.altitude = finite(component.altitude, base.altitude);
@@ -2116,7 +2186,7 @@ export const PlanPlanner = {
 export const transitSeconds = (path, climb, descent, speed) =>
   MotionTimes.climb(climb) + transitLegs(path, speed).reduce((sum, leg) => sum + leg.seconds, 0) + MotionTimes.climb(descent);
 
-/** Los tramos de un tránsito por `path` (sin los de menos de un metro, que no vuela): {from, to, seconds}, con el giro en la esquina de antes. */
+/** Los tramos de un tránsito por `path` (sin los de menos de un metro, que no vuela): {from, to, seconds, turn}, con el giro en la esquina de antes. */
 export function transitLegs(path, speed) {
   const legs = path
     .slice(1)
@@ -2124,7 +2194,8 @@ export function transitLegs(path, speed) {
     .filter(([a, b]) => Geo.distance(a, b) > MotionTimes.ARRIVAL);
   return legs.map(([a, b], i) => {
     const turn = i === 0 ? 0 : MotionTimes.turn(angleDifference(Geo.bearing(legs[i - 1][0], legs[i - 1][1]), Geo.bearing(a, b)));
-    return { from: a, to: b, seconds: turn + MotionTimes.straight(Geo.distance(a, b), speed) };
+    // `turn`: los segundos que gira quieto en la esquina de antes.
+    return { from: a, to: b, seconds: turn + MotionTimes.straight(Geo.distance(a, b), speed), turn };
   });
 }
 
@@ -2605,6 +2676,9 @@ export function formatDuration(seconds) {
 const num = (value, decimals = 0) =>
   value.toLocaleString(LOCALE, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
+/** Una velocidad con un decimal: "4.5 m/s". */
+export const speedText = (metersPerSecond) => `${num(metersPerSecond, 1)} m/s`;
+
 /** "N", "NE"… para un rumbo, como en una brújula. */
 export function compass(heading) {
   return ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][Math.round(Geo.normalize(heading) / 45) % 8];
@@ -2949,7 +3023,10 @@ export const FlightPreview = {
       const info = { label, kind: "transit" };
       push(from, { ...from, altitude: cruise }, MotionTimes.climb(cruise - from.altitude), info);
       for (const leg of transitLegs([from.position, ...via, to.position], plan.transitSpeed)) {
-        push({ position: leg.from, altitude: cruise }, { position: leg.to, altitude: cruise }, leg.seconds, info);
+        // En cada esquina gira quieto y sigue, arrancando y frenando.
+        const start = { position: leg.from, altitude: cruise };
+        push(start, start, leg.turn, { ...info, spinTo: Geo.bearing(leg.from, leg.to) });
+        push(start, { position: leg.to, altitude: cruise }, leg.seconds - leg.turn, { ...info, cruise: plan.transitSpeed });
       }
       push({ ...to, altitude: cruise }, to, MotionTimes.climb(cruise - to.altitude), info);
     };
@@ -2999,7 +3076,7 @@ export const FlightPreview = {
             const start = time;
             push(at, at, photoSeconds(component.photoSize), { ...info, kind: "shot" });
             shoot(1, at.position, start);
-          } else if (command.type === "heading") push(at, at, TURN_SECONDS, { ...info, facing: command.value });
+          } else if (command.type === "heading") push(at, at, TURN_SECONDS, { ...info, spinTo: command.value });
           else if (command.type === "altitude") {
             const to = { ...at, altitude: command.value };
             push(at, to, Math.abs(command.value - at.altitude) / VERTICAL_SPEED, info);
@@ -3013,26 +3090,38 @@ export const FlightPreview = {
         push(points[0], points[0], route.durationSeconds, { ...info, kind: "shot" });
         shoot(route.photoCount, points[0].position, start);
       } else if (component.type === "map" && route.segmentSeconds?.length === points.length - 1) {
-        // Tramo por tramo con lo que tarda el piloto automático (arranca, frena, gira en cada
-        // cambio de línea), pasando por cada foto en el segundo en que la toma.
+        // Tramo por tramo con lo que tarda el piloto automático: gira quieto si hace falta, arranca
+        // y frena en cada cambio de línea, y pasa por cada foto en el segundo en que la toma, mirando
+        // como dice "El dron mira".
         const start = time;
         const altitude = component.altitude;
         const photos = PhotoPoints.of(component, route);
+        const headings = MapPlanner.headings(component, route.legs);
         let k = 0;
         route.legs.forEach((leg, i) => {
-          if (i > 0) push({ position: route.legs[i - 1].end, altitude }, { position: leg.start, altitude }, route.segmentSeconds[2 * i - 1], info);
+          const turn = route.turnSeconds?.[i] ?? 0;
+          const first = { position: leg.start, altitude };
+          if (i > 0) {
+            const from = { position: route.legs[i - 1].end, altitude };
+            const gap = route.segmentSeconds[2 * i - 1] - turn;
+            // Si no hay cambio de línea que volar, el giro lleva al inicio del tramo.
+            push(from, gap > 0 ? from : first, turn, { ...info, spinTo: headings[i] });
+            push(from, first, gap, { ...info, facing: headings[i], cruise: component.maxSpeed });
+          }
           const end = time + route.segmentSeconds[2 * i];
-          let at = { position: leg.start, altitude };
+          if (i === 0) push(first, first, turn, { ...info, spinTo: headings[0] });
+          let at = first;
           const count = MapPlanner.photoDistances(route, leg).length;
           for (let n = 0; n < count; n++, k++) {
             const photo = photos[k];
             const t = start + route.photoSeconds[k];
             const to = { position: photo.position, altitude };
-            push(at, to, t - time, info);
+            push(at, to, t - time, { ...info, facing: headings[i] });
             for (let s = 0; s < photo.shots; s++) shots.push({ time: t, position: photo.position });
             at = to;
           }
-          push(at, { position: leg.end, altitude }, end - time, info);
+          // Sin fotos, el tramo entero arranca y frena.
+          push(at, { position: leg.end, altitude }, end - time, { ...info, facing: headings[i], ...(count === 0 ? { cruise: route.speed } : {}) });
         });
       } else {
         const lengths = points.slice(1).map((p, i) => Geo.distance(points[i].position, p.position));
@@ -3062,10 +3151,16 @@ export const FlightPreview = {
       push(here, { ...here, altitude: 0 }, result.landingSeconds, { label: "Aterrizando", kind: "transit" });
     }
 
-    // Hacia dónde mira en cada tramo: hacia donde va o, quieto, como venía.
+    // Hacia dónde mira en cada tramo: hacia donde va o, quieto, como venía (o girando).
     let heading = 0;
     for (const segment of segments) {
       const c = segment.component;
+      if (segment.spinTo !== undefined) {
+        segment.heading = heading;
+        segment.turn = angleDifference(heading, segment.spinTo);
+        heading = segment.spinTo;
+        continue;
+      }
       if (segment.facing !== undefined) heading = segment.facing;
       else if (segment.kind === "shot") heading = c.type === "photo" || c.type === "pano" ? c.heading : heading;
       else if (Geo.distance(segment.from.position, segment.to.position) > 0.5) heading = Geo.bearing(segment.from.position, segment.to.position);
@@ -3089,13 +3184,28 @@ export const FlightPreview = {
       else hi = mid;
     }
     const segment = segments[lo];
-    const f = Math.min(1, Math.max(0, (t - segment.t0) / (segment.t1 - segment.t0)));
-    const lerp = (a, b) => a + (b - a) * f;
+    const seconds = segment.t1 - segment.t0;
+    const f = Math.min(1, Math.max(0, (t - segment.t0) / seconds));
+    // Por dónde va: acelerando y frenando, o a ritmo parejo.
+    const length = Geo.distance(segment.from.position, segment.to.position);
+    let along = f;
+    let speed = length / seconds;
+    if (segment.cruise !== undefined && length > 0) {
+      const [d, v] = MotionTimes.along(t - segment.t0, length, segment.cruise);
+      along = Math.min(1, d / length);
+      speed = v;
+    }
+    const lerp = (a, b, k = f) => a + (b - a) * k;
     let heading = segment.heading + segment.turn * f;
-    // En una órbita que mira al centro, hacia el centro.
     const c = segment.component;
-    const position = [lerp(segment.from.position[0], segment.to.position[0]), lerp(segment.from.position[1], segment.to.position[1])];
-    if (c?.type === "orbit" && c.heading === "center" && c.center) heading = Geo.bearing(position, c.center);
+    const position = [lerp(segment.from.position[0], segment.to.position[0], along), lerp(segment.from.position[1], segment.to.position[1], along)];
+    // En una órbita, según hacia dónde mira (hacia adelante ya es hacia donde va).
+    if (c?.type === "orbit" && c.center && segment.kind === "route") {
+      if (c.heading === "center") heading = Geo.bearing(position, c.center);
+      else if (c.heading === "outward") heading = Geo.bearing(c.center, position);
+      else if (c.heading === "backward") heading += 180;
+      else if (c.heading === "custom") heading = c.headingAngle;
+    }
     return {
       index: lo,
       position,
@@ -3105,7 +3215,20 @@ export const FlightPreview = {
       kind: segment.kind,
       component: c ?? null,
       photos: FlightPreview.photosBy(timeline, t),
+      // Velocidad horizontal y vertical (positiva subiendo), en m/s.
+      speed,
+      climb: (segment.to.altitude - segment.from.altitude) / seconds,
     };
+  },
+
+  /** La altura, la velocidad y las fotos que lleva, como dice la barra de la vista previa. */
+  stats(timeline, state) {
+    const c = state.component;
+    const above = c && TerrainFollow.follows(c) && state.kind !== "transit" ? " sobre el suelo" : "";
+    const stats = [`${num(state.altitude)} m${above}`, speedText(state.speed)];
+    if (Math.abs(state.climb) >= 0.05) stats.push(`${state.climb > 0 ? "↑" : "↓"} ${speedText(Math.abs(state.climb))}`);
+    if (timeline.photoCount) stats.push(`${state.photos} de ${timeline.photoCount} fotos`);
+    return stats.join(" · ");
   },
 
   /** Cuántas fotos lleva a los `time` segundos. */

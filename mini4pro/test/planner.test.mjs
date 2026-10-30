@@ -7,6 +7,9 @@ import {
   FacadePlanner,
   Geo,
   MapPlanner,
+  MotionTimes,
+  mapHeading,
+  speedText,
   MINI_4_PRO,
   MINI_4_PRO_12MP,
   OrbitPlanner,
@@ -387,12 +390,94 @@ test("la inclinación oblicua queda entre -20° y -80°", () => {
 
 test("en 12 MP el GSD es el doble", () => near(MapPlanner.gsd(MINI_4_PRO_12MP, 10), 0.36, 0.005));
 
-test("con el dron de lado, el lado corto de la foto queda entre líneas", () => {
+test("hacia dónde mira el dron no cambia las líneas (PlannerTest.theHeadingDoesNotChangeTheLines)", () => {
   const forward = MapPlanner.plan(map({ altitude: 30 }));
   const left = MapPlanner.plan(map({ altitude: 30, heading: "left" }));
   near(forward.lineSpacing, 12.92, 0.05);
-  near(left.lineSpacing, 9.7, 0.05);
-  near(left.photoSpacing, 10.77, 0.05, "y el lado largo a lo largo de la línea");
+  assert.deepEqual(left.path, forward.path);
+  near(left.photoSpacing, forward.photoSpacing, 1e-9);
+  // De lado la foto va girada: el traslape real cambia.
+  const [side, front] = MapPlanner.flownOverlap(map({ altitude: 30, heading: "left" }), left);
+  near(side, 60, 0.1);
+  near(front, 81.25, 0.1);
+  near(MapPlanner.flownOverlap(map({ altitude: 30 }), forward)[0], 70, 0.1);
+});
+
+test("separar las líneas según el rumbo: el lado corto de la foto queda entre líneas", () => {
+  const left = map({ altitude: 30, heading: "left", headingSpacing: true });
+  const plan = MapPlanner.plan(left);
+  near(plan.lineSpacing, 9.7, 0.05);
+  near(plan.photoSpacing, 10.77, 0.05, "y el lado largo a lo largo de la línea");
+  near(MapPlanner.flownOverlap(left, plan)[0], 70, 0.1);
+  near(MapPlanner.flownOverlap(left, plan)[1], 75, 0.1);
+  // Mirando adelante o con un ángulo que no deja la foto de lado, no cambia nada.
+  near(MapPlanner.plan(map({ altitude: 30, headingSpacing: true })).lineSpacing, 12.92, 0.05);
+  const slight = map({ altitude: 30, heading: "custom", headingAngle: 30, headingReference: "path", headingSpacing: true });
+  assert.equal(MapPlanner.sideways(slight), false);
+  near(MapPlanner.plan(slight).lineSpacing, 12.92, 0.05);
+  assert.equal(normalizePlan({ version: 2, components: [{ type: "map", headingSpacing: "sí" }] }).components[0].headingSpacing, false);
+});
+
+test("rumbo en el mapa: solo hacia adelante gira entre líneas (AutopilotTest.mapHeadingModes)", () => {
+  // Un tramo de vuelta (210°) en una pasada cuya primera línea fue a 30°.
+  const base = { ...newMapComponent(), direction: 30 };
+  near(mapHeading(base, 210, 30), 210, 0.01);
+  near(mapHeading({ ...base, heading: "left" }, 210, 30), 300, 0.01);
+  near(mapHeading({ ...base, heading: "right" }, 210, 30), 120, 0.01);
+  const custom = { ...base, heading: "custom", headingAngle: 45 };
+  near(mapHeading(custom, 210, 30), 45, 0.01);
+  near(mapHeading({ ...custom, headingReference: "path" }, 210, 30), 75, 0.01, "desde la primera línea, sin girar");
+
+  // Empieza arriba: la primera línea va hacia el sur.
+  const small = [
+    { x: 0, y: 0 },
+    { x: 60, y: 0 },
+    { x: 60, y: 60 },
+    { x: 0, y: 60 },
+  ].map(pr.toGeo);
+  const area = { ...newMapComponent(), boundary: small, altitude: 30, start: pr.toGeo({ x: 0, y: 60 }) };
+  const headings = (c) => MapPlanner.headings(c, MapPlanner.plan(c).legs);
+  const forward = headings(area);
+  near(forward[0], 180, 0.5);
+  near(forward[1], 0, 0.5, "da la vuelta en cada línea");
+  const all = (c, value) => headings(c).every((h) => Math.abs(((h - value + 540) % 360) - 180) < 0.5);
+  assert.ok(all({ ...area, heading: "left" }, 90), "a la izquierda de la primera línea (hacia el sur): al este");
+  assert.ok(all({ ...area, heading: "right" }, 270));
+  const path = { ...area, heading: "custom", headingAngle: 30, headingReference: "path" };
+  assert.ok(all(path, 210));
+  assert.ok(all({ ...path, headingReference: "north" }, 30));
+  // Con patrón cruzado gira una vez, al empezar la segunda pasada.
+  const grid = new Set(headings({ ...area, heading: "left", pattern: "grid" }).map((h) => Math.round(h) % 360));
+  assert.equal(grid.size, 2);
+});
+
+test("de lado no gira quieto en los cambios de línea (PlannerTest.sidewaysMapsDoNotTurnBetweenLines)", () => {
+  const forward = MapPlanner.plan(map({ altitude: 30 }));
+  const left = MapPlanner.plan(map({ altitude: 30, heading: "left" }));
+  assert.ok(forward.turnSeconds.slice(1).every((s) => s > 4));
+  assert.ok(left.turnSeconds.slice(1).every((s) => s === 0));
+  assert.ok(left.durationSeconds < forward.durationSeconds - 4 * (forward.legs.length - 1));
+});
+
+test("MotionTimes.along sigue a straight y timeAt (PlannerTest.alongFollowsTheStraightTiming)", () => {
+  for (const [length, speed] of [
+    [17, 8],
+    [100, 5],
+    [3, 12],
+    [0.5, 2],
+  ]) {
+    const moving = MotionTimes.straight(length, speed) - MotionTimes.settle(Math.min(12, Math.max(0.3, speed)));
+    near(MotionTimes.along(moving, length, speed)[0], length, 1e-6);
+    near(MotionTimes.along(moving + 1, length, speed)[1], 0, 1e-9);
+    for (const d of [0.1, 0.4, 0.7, 0.95].map((k) => k * length)) {
+      near(MotionTimes.along(MotionTimes.timeAt(d, length, speed), length, speed)[0], d, 1e-6);
+    }
+  }
+  // 17 m entre líneas a 8 m/s: no llega a 8, arranca y frena enseguida.
+  let peak = 0;
+  for (let i = 0; i <= 100; i++) peak = Math.max(peak, MotionTimes.along(i * 0.1, 17, 8)[1]);
+  near(peak, 5.1, 0.05);
+  assert.equal(speedText(4.46), "4.5 m/s");
 });
 
 test("espaciado por distancia usa los metros indicados", () => {
@@ -1403,6 +1488,112 @@ test("vista previa: el vuelo dura lo mismo que el estimado y pasa por cada compo
     assert.ok(state.photos >= last);
     last = state.photos;
   }
+});
+
+/** Una misión con un componente de cada tipo, la misma de FlightPreviewTest.kt. */
+const PREVIEW_FIXTURE =
+  "{\"version\":2,\"id\":\"ffd86a6f-fc31-4a42-8837-3d45012946a2\",\"name\":\"Vista previa\",\"finishAction\":\"GO_HOME\",\"takeo" +
+  "ff\":[18.1797305,-65.8200946],\"transitSpeed\":8,\"components\":[{\"id\":\"cp0qtl3gb\",\"type\":\"map\",\"enabled\":true,\"alt" +
+  "itude\":40,\"terrainFollow\":false,\"boundary\":[[18.18,-65.82],[18.18,-65.8192436],[18.180539,-65.8192436],[18.180" +
+  "539,-65.82]],\"frontOverlap\":75,\"sideOverlap\":70,\"direction\":0,\"pattern\":\"normal\",\"gimbalPitch\":-90,\"maxSpeed\":" +
+  "8,\"minPhotoInterval\":5,\"captureMode\":\"photo\",\"photoSize\":\"48mp\",\"capturePriority\":\"distance\",\"photoType\":\"sing" +
+  "le\",\"spacing\":\"overlap\",\"frontDistance\":10,\"sideDistance\":10,\"heading\":\"forward\",\"headingAngle\":0,\"headingRefe" +
+  "rence\":\"north\",\"verifyFileCreated\":false,\"highWindTolerance\":false},{\"id\":\"c48j3hgwu\",\"type\":\"orbit\",\"enabled\"" +
+  ":true,\"altitude\":30,\"center\":[18.1804492,-65.818109],\"radius\":25,\"finalAltitude\":45,\"clockwise\":true,\"rotation" +
+  "s\":1,\"speed\":4,\"heading\":\"center\",\"headingAngle\":0,\"gimbalPitch\":-20,\"captureMode\":\"photo\",\"photoInterval\":3,\"" +
+  "photoSize\":\"48mp\"},{\"id\":\"ck9imt16d\",\"type\":\"waypoints\",\"enabled\":true,\"altitude\":30,\"terrainFollow\":false,\"po" +
+  "ints\":[{\"position\":[18.181078,-65.8176362],\"altitude\":20,\"action\":\"none\",\"hoverSeconds\":3},{\"position\":[18.181" +
+  "3475,-65.8171635],\"altitude\":35,\"action\":\"none\",\"hoverSeconds\":3},{\"position\":[18.1808983,-65.8169744],\"altitu" +
+  "de\":15,\"action\":\"none\",\"hoverSeconds\":3}],\"speed\":5,\"gimbalPitch\":-30,\"captureMode\":\"none\",\"photoInterval\":3,\"" +
+  "photoSize\":\"48mp\"},{\"id\":\"c9ocpk0po\",\"type\":\"photo\",\"enabled\":true,\"altitude\":30,\"terrainFollow\":false,\"positi" +
+  "on\":[18.181617,-65.8185817],\"heading\":120,\"gimbalPitch\":-30,\"captureMode\":\"photo\",\"photoSize\":\"48mp\",\"photoTyp" +
+  "e\":\"single\"},{\"id\":\"cjg5qbe5o\",\"type\":\"pano\",\"enabled\":true,\"altitude\":40,\"terrainFollow\":false,\"position\":[18" +
+  ".1817966,-65.8190545],\"panoType\":\"sphere\",\"heading\":0,\"gimbalPitch\":0,\"captureMode\":\"photo\",\"photoSize\":\"48mp\"" +
+  "},{\"id\":\"clz4mh9k7\",\"type\":\"corridor\",\"enabled\":true,\"altitude\":30,\"terrainFollow\":false,\"path\":[[18.1822458,-" +
+  "65.82],[18.1823356,-65.8190545],[18.1828746,-65.8184872]],\"width\":40,\"frontOverlap\":75,\"sideOverlap\":70,\"gimba" +
+  "lPitch\":-90,\"maxSpeed\":8,\"minPhotoInterval\":5,\"captureMode\":\"photo\",\"photoSize\":\"48mp\",\"photoType\":\"single\"},{" +
+  "\"id\":\"cccs7lr6s\",\"type\":\"facade\",\"enabled\":true,\"face\":\"line\",\"boundary\":[[18.1808983,-65.8205673],[18.1814373" +
+  ",-65.8205673]],\"side\":\"left\",\"distance\":10,\"altitude\":10,\"finalAltitude\":30,\"pattern\":\"vertical\",\"horizontalOv" +
+  "erlap\":50,\"verticalOverlap\":50,\"spacing\":\"overlap\",\"horizontalDistance\":5,\"verticalDistance\":5,\"gimbalPitch\":0" +
+  ",\"speed\":3,\"captureMode\":\"photo\",\"photoSize\":\"48mp\",\"photoType\":\"single\"},{\"id\":\"cf76b5hoa\",\"type\":\"commands\"," +
+  "\"enabled\":true,\"position\":[18.1803593,-65.8201891],\"altitude\":30,\"gimbalPitch\":-30,\"commands\":[{\"type\":\"wait\"," +
+  "\"value\":3},{\"type\":\"photo\",\"value\":0},{\"type\":\"heading\",\"value\":270},{\"type\":\"altitude\",\"value\":50},{\"type\":\"p" +
+  "hoto\",\"value\":0}],\"photoSize\":\"48mp\"}]}";
+
+test("vista previa: igual que FlightPreviewTest.kt (rumbo, giros quietos, velocidad)", () => {
+  const plan = normalizePlan(JSON.parse(PREVIEW_FIXTURE));
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, 1527.925, 1e-3);
+  assert.equal(timeline.segments.length, 248);
+  assert.equal(timeline.photoCount, 208);
+  const expected = [
+    [0, 0, 18.1797305, -65.8200946, 0, 0, 0, "Hacia 1. Mapa"],
+    [0.1, 28, 18.1804101, -65.8194589, 40, 180, 20, "1. Mapa"],
+    [0.25, 120, 18.1816011, -65.8185462, 30, 295.204, 38, "Hacia 4. Foto"],
+    [0.4, 127, 18.1821604, -65.8190568, 30, 84.291, 75, "6. Corredor"],
+    [0.55, 133, 18.1823313, -65.8197141, 30, 84.291, 115, "6. Corredor"],
+    [0.7, 138, 18.1819964, -65.8202953, 30, 211.916, 156, "Hacia 7. Fachada"],
+    [0.85, 196, 18.1811379, -65.8206619, 15, 90, 184, "7. Fachada"],
+    [0.97, 241, 18.1803593, -65.8201891, 30, 140.195, 206, "8. Comandos"],
+    [1, 247, 18.1797305, -65.8200946, 0, 171.874, 208, "Aterrizando"],
+  ];
+  for (const [f, index, lat, lon, altitude, heading, photos, label] of expected) {
+    const s = FlightPreview.at(timeline, timeline.duration * f);
+    assert.equal(s.index, index, `tramo a ${f}`);
+    near(s.position[0], lat, 2e-7);
+    near(s.position[1], lon, 2e-7);
+    near(s.altitude, altitude, 2e-3);
+    near(Math.abs(((s.heading - heading + 540) % 360) - 180), 0, 2e-3, `rumbo a ${f}`);
+    assert.equal(s.photos, photos);
+    assert.equal(s.label, label);
+  }
+  const stats = (f) => FlightPreview.stats(timeline, FlightPreview.at(timeline, timeline.duration * f));
+  assert.equal(stats(0), "0 m · 0.0 m/s · ↑ 2.8 m/s · 0 de 208 fotos");
+  assert.equal(stats(0.1), "40 m · 2.2 m/s · 20 de 208 fotos");
+  assert.equal(stats(0.7), "30 m · 8.0 m/s · 156 de 208 fotos");
+  assert.equal(stats(1), "0 m · 0.0 m/s · ↓ 3.0 m/s · 208 de 208 fotos");
+});
+
+test("vista previa: de lado mantiene el rumbo; adelante se detiene a girar en cada línea", () => {
+  const area = { ...newMapComponent(), boundary: square, altitude: 40, photoSize: "12mp", minPhotoInterval: 2 };
+  const timeline = (c) => FlightPreview.timeline({ ...newPlan("Mapa", [c]), finishAction: "HOVER", takeoff: pr.toGeo({ x: 0, y: -20 }) });
+  const inMap = (t) => t.segments.filter((s) => s.label === "1. Mapa");
+
+  // Mirando adelante: en cada cambio de línea se detiene y da media vuelta quieto.
+  const forward = timeline(area);
+  const spins = inMap(forward).filter((s) => s.spinTo !== undefined && Math.abs(s.turn) > 170);
+  assert.equal(spins.length, 5);
+  for (const spin of spins) near(FlightPreview.at(forward, (spin.t0 + spin.t1) / 2).speed, 0, 1e-9);
+  // El cambio de línea arranca y frena: va más rápido a la mitad que al principio.
+  const hop = inMap(forward).find((s) => s.cruise !== undefined);
+  const early = FlightPreview.at(forward, hop.t0 + 0.2);
+  const middle = FlightPreview.at(forward, hop.t0 + (hop.t1 - hop.t0) * 0.45);
+  assert.ok(early.speed < 2 && middle.speed > 4, `${early.speed} < ${middle.speed}`);
+
+  // A la izquierda: después de girar al llegar, el mismo rumbo todo el mapa, sin girar quieto.
+  const left = timeline({ ...area, heading: "left" });
+  assert.notEqual(inMap(left)[0].spinTo, undefined);
+  const after = inMap(left).slice(1);
+  const headings = after.flatMap((s) => [0.1, 0.5, 0.9].map((k) => FlightPreview.at(left, s.t0 + (s.t1 - s.t0) * k).heading));
+  assert.ok(headings.every((h) => Math.abs(((h - headings[0] + 540) % 360) - 180) < 1e-6));
+  assert.ok(after.every((s) => Math.abs(s.turn) <= 1e-9));
+});
+
+test("vista previa: la órbita mira hacia donde se pidió", () => {
+  const center = [18.18, -65.82];
+  const state = (heading) => {
+    const orbit = { ...newOrbitComponent(center), radius: 30, heading, headingAngle: 200 };
+    const timeline = FlightPreview.timeline({ ...newPlan("Órbita", [orbit]), finishAction: "HOVER" });
+    const segment = timeline.segments.filter((s) => s.kind === "route")[5];
+    return FlightPreview.at(timeline, (segment.t0 + segment.t1) / 2);
+  };
+  const diff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+  const c = state("center");
+  near(diff(Geo.bearing(c.position, center), c.heading), 0, 1e-6);
+  const out = state("outward");
+  near(diff(Geo.bearing(center, out.position), out.heading), 0, 1e-6);
+  near(state("custom").heading, 200, 1e-9);
+  near(diff(state("forward").heading, state("backward").heading), 180, 1e-6);
 });
 
 test("partes de la misión: desde un componente o solo uno, igual que MissionPartsTest.kt", () => {

@@ -1,6 +1,6 @@
 // Sincronización con GitHub: un archivo JSON por misión en la rama "misiones" de Fidcom/mini4pro-app,
 // la misma que lee la app del teléfono. El token se guarda solo en este navegador.
-import { normalizePlan, serializePlan } from "./planner.js?v=20261030b";
+import { normalizePlan, serializePlan } from "./planner.js?v=20261030c";
 
 const REPO = "Fidcom/mini4pro-app";
 const BRANCH = "misiones";
