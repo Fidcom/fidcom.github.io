@@ -23,6 +23,8 @@ import {
   componentName,
   componentPoints,
   copyComponent,
+  copyName,
+  duplicatePlan,
   endAltitude,
   isKnown,
   newCommand,
@@ -1627,4 +1629,52 @@ test("partes de la misión: desde un componente o solo uno, igual que MissionPar
   assert.equal(MissionParts.describe(plan, ["orbita", "foto"]), "desde Órbita 3 (2 componentes)");
   assert.equal(MissionParts.describe(plan, ["foto"]), "Foto 5");
   assert.equal(MissionParts.describe(plan, null), "toda la misión");
+});
+
+// Igual que DuplicateTest.kt de la app.
+test("los nombres de las copias no se repiten ni se alargan", () => {
+  assert.equal(copyName("Finca", ["Finca"]), "Finca (copia)");
+  assert.equal(copyName("Finca", ["Finca", "Finca (copia)"]), "Finca (copia 2)");
+  assert.equal(copyName("Finca", ["Finca", "Finca (copia)", "Finca (copia 2)"]), "Finca (copia 3)");
+  // La copia de una copia sigue la cuenta de la original.
+  assert.equal(copyName("Finca (copia)", ["Finca", "Finca (copia)"]), "Finca (copia 2)");
+  assert.equal(copyName("Finca (Copia 2)", ["Finca (copia)", "Finca (Copia 2)"]), "Finca (copia 3)");
+  assert.equal(copyName("Finca", ["FINCA (COPIA)"]), "Finca (copia 2)");
+  // Un hueco en la cuenta se vuelve a usar.
+  assert.equal(copyName("Finca (copia 2)", ["Finca", "Finca (copia 2)"]), "Finca (copia)");
+  // Paréntesis que no son de una copia se quedan.
+  assert.equal(copyName("Río (norte)", ["Río (norte)"]), "Río (norte) (copia)");
+  assert.equal(copyName("(copia)", ["(copia)"]), "(copia) (copia)");
+});
+
+test("duplicar da otra misión con los mismos componentes", () => {
+  const tower = { id: "c9", type: "tower", name: "Torre", enabled: true, height: 40 };
+  const original = {
+    ...newPlan("Humacao", [
+      { ...newMapComponent([[18.18, -65.82], [18.18, -65.81], [18.19, -65.81]]), id: "c1" },
+      { ...newOrbitComponent([18.185, -65.815]), id: "c2", radius: 40 },
+      tower,
+    ]),
+    id: "original",
+    finishAction: "LAND",
+    takeoff: [18.17, -65.82],
+    transitSpeed: 6,
+    updatedAt: 1000,
+  };
+
+  const copy = duplicatePlan(original, ["Humacao"], 5000);
+
+  assert.notEqual(copy.id, original.id);
+  assert.equal(copy.name, "Humacao (copia)");
+  assert.equal(copy.updatedAt, 5000);
+  // Todo lo demás (componentes con sus ids, despegue, al terminar) queda igual, y la original no cambia.
+  assert.deepEqual(copy, { ...original, id: copy.id, name: copy.name, updatedAt: copy.updatedAt });
+  copy.components[0].boundary[0][0] = 0;
+  assert.equal(original.components[0].boundary[0][0], 18.18);
+  assert.equal(original.name, "Humacao");
+  // Se guarda como cualquier misión, con el componente desconocido tal cual.
+  const saved = normalizePlan(JSON.parse(serializePlan(copy)));
+  assert.equal(saved.id, copy.id);
+  assert.deepEqual(saved.components.map((c) => c.id), ["c1", "c2", "c9"]);
+  assert.equal(saved.components[2].type, "tower");
 });

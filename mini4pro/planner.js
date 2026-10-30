@@ -1521,6 +1521,30 @@ export function newPlan(name = "Misión", components = []) {
   };
 }
 
+/**
+ * "Finca (copia)", y si ya existe "Finca (copia 2)", "Finca (copia 3)"… (sin distinguir mayúsculas).
+ * La copia de una copia no se alarga: "Finca (copia)" da "Finca (copia 2)". Igual que copyName en
+ * Mission.kt.
+ */
+export function copyName(name, taken) {
+  const stripped = name.replace(/\s*\(copia(?: \d+)?\)$/i, "");
+  const base = stripped.trim() ? stripped : name.trim();
+  const used = new Set(taken.map((t) => t.toLowerCase()));
+  for (let n = 1; ; n++) {
+    const candidate = n === 1 ? `${base} (copia)` : `${base} (copia ${n})`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+/**
+ * Otra versión de la misión para hacer pruebas: otro id (se sincroniza como una misión aparte),
+ * el nombre con «(copia)» y la hora de ahora. Los componentes y el despegue quedan iguales. Igual
+ * que Plan.duplicate en Mission.kt.
+ */
+export function duplicatePlan(plan, takenNames, at = Date.now()) {
+  return { ...structuredClone(plan), id: uuid(), name: copyName(plan.name, takenNames), updatedAt: at };
+}
+
 export function newMapComponent(boundary = []) {
   return {
     id: componentId(),
