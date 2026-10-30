@@ -40,6 +40,7 @@ import {
   componentSummary,
   importKml,
   FlightPreview,
+  MissionParts,
   exportKml,
   planPoints,
   projection,
@@ -1402,4 +1403,37 @@ test("vista previa: el vuelo dura lo mismo que el estimado y pasa por cada compo
     assert.ok(state.photos >= last);
     last = state.photos;
   }
+});
+
+test("partes de la misión: desde un componente o solo uno, igual que MissionPartsTest.kt", () => {
+  const area = { ...newMapComponent(), id: "mapa", altitude: 40, boundary: [at(0, 100), at(60, 100), at(60, 160), at(0, 160)] };
+  const zone = { ...block(), id: "zona" };
+  const orbit = { ...newOrbitComponent(at(150, 50)), id: "orbita", radius: 25, altitude: 30 };
+  const off = { ...newPhotoComponent(at(200, 0)), id: "apagada", enabled: false };
+  const photo = { ...newPhotoComponent(at(100, -50)), id: "foto", altitude: 25 };
+  const plan = { ...newPlan("Partes", [area, zone, orbit, off, photo]), takeoff: at(0, 0) };
+
+  assert.deepEqual(MissionParts.flyable(plan).map((item) => item.component.id), ["mapa", "orbita", "foto"]);
+  assert.deepEqual(MissionParts.parts(plan, "orbita", "from"), ["orbita", "foto"]);
+  assert.deepEqual(MissionParts.parts(plan, "orbita", "only"), ["orbita"]);
+  assert.deepEqual(MissionParts.parts(plan, "orbita", "repeat"), ["orbita"]);
+  assert.deepEqual(MissionParts.parts(plan, "foto", "from"), ["foto"]);
+
+  const scoped = MissionParts.restrict(plan, ["orbita", "foto"]);
+  // Las zonas siguen igual; lo que no se eligió queda apagado, sin perderse ni cambiar la misión original.
+  assert.deepEqual(scoped.components.map((c) => c.id), plan.components.map((c) => c.id));
+  assert.equal(scoped.components[1].enabled, true);
+  assert.equal(scoped.components[0].enabled, false);
+  assert.equal(plan.components[0].enabled, true);
+  assert.equal(MissionParts.restrict(plan, null), plan);
+
+  // La vista previa empieza en el despegue y solo vuela la órbita y la foto, con su número en la misión.
+  const labels = new Set(FlightPreview.timeline(scoped).segments.map((s) => s.label));
+  assert.ok(labels.has("Hacia 3. Órbita"), [...labels].join(", "));
+  assert.ok(labels.has("5. Foto"));
+  assert.ok(![...labels].some((label) => label.includes("Mapa")));
+
+  assert.equal(MissionParts.describe(plan, ["orbita", "foto"]), "desde Órbita 3 (2 componentes)");
+  assert.equal(MissionParts.describe(plan, ["foto"]), "Foto 5");
+  assert.equal(MissionParts.describe(plan, null), "toda la misión");
 });

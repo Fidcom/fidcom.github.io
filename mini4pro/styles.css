@@ -644,6 +644,14 @@ a.button {
   margin-top: 10px;
 }
 
+.parts-row {
+  margin: 4px 0 6px;
+}
+
+.parts-row.single {
+  grid-template-columns: 1fr;
+}
+
 .button-row .button:disabled {
   opacity: 0.35;
   cursor: default;
