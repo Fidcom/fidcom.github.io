@@ -86,9 +86,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261030b";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030b";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030b";
+} from "./planner.js?v=20261030c";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030c";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030c";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -1870,7 +1870,7 @@ function selectParam(params, obj, { key, label, options, unset = false, help, re
   params.append(el);
 }
 
-/** Un interruptor de sí o no. */
+/** Un interruptor de sí o no. `help` puede ser una función: se actualiza cuando cambia la misión. */
 function toggleParam(params, obj, { key, label, help, rebuild = false }) {
   const el = document.createElement("label");
   el.className = "param toggle";
@@ -1878,7 +1878,9 @@ function toggleParam(params, obj, { key, label, help, rebuild = false }) {
     <span class="toggle-text"><span class="label"></span><span class="help"></span></span>
     <input type="checkbox" role="switch" />`;
   el.querySelector(".label").textContent = label;
-  el.querySelector(".help").textContent = help ?? "";
+  const showHelp = () => (el.querySelector(".help").textContent = (typeof help === "function" ? help() : help) ?? "");
+  showHelp();
+  if (typeof help === "function") helpUpdaters.push(showHelp);
   const input = el.querySelector("input");
   input.id = `param-${key}`;
   input.checked = Boolean(obj[key]);
@@ -2190,6 +2192,29 @@ function componentBack() {
 $("component-back").addEventListener("click", componentBack);
 $("component-done").addEventListener("click", () => showView(null));
 
+/**
+ * Ayuda de "Separar las líneas según el rumbo": qué hace y cuántas líneas, tiempo y fotos da cada
+ * opción, para escoger la que conviene.
+ */
+function headingSpacingHelp(c) {
+  if (!MapPlanner.sideways(c)) return "Con este rumbo la foto no queda de lado: las líneas no cambian";
+  // Llegando de donde viene el dron, como lo que dice el componente arriba.
+  const from = selectedItem()?.approach?.from ?? null;
+  const now = MapPlanner.plan(c, from);
+  const other = MapPlanner.plan({ ...c, headingSpacing: !c.headingSpacing }, from);
+  const summary = (plan) => `${plan.legs.length} líneas · ${formatDuration(plan.durationSeconds)}` + (plan.photoCount ? ` · ${plan.photoCount} fotos` : "");
+  let what;
+  if (c.headingSpacing) {
+    what = "Líneas más juntas para la foto de lado: mantiene el traslape";
+  } else {
+    const [side, front] = MapPlanner.flownOverlap(c, now);
+    what =
+      `Mismas líneas que mirando adelante: de lado el traslape real queda en ${num(side)} % lateral y ${num(front)} % frontal` +
+      (side < 0 ? " (¡quedan huecos entre líneas!)" : "");
+  }
+  return `${what}\nAsí: ${summary(now)}\n${c.headingSpacing ? "Sin separar" : "Separadas"}: ${summary(other)}`;
+}
+
 function buildMapParams(params, c) {
   const plan = () => selectedItem()?.result ?? MapPlanner.plan(c);
   const photos = c.captureMode === "photo";
@@ -2387,8 +2412,8 @@ function buildMapParams(params, c) {
     help: () =>
       ({
         forward: "Hacia donde vuela; gira en cada línea",
-        left: "A la izquierda de la línea, sin girar entre líneas",
-        right: "A la derecha de la línea, sin girar entre líneas",
+        left: "A la izquierda de la primera línea; no gira entre líneas",
+        right: "A la derecha de la primera línea; no gira entre líneas",
         custom: "",
       })[c.heading],
   });
@@ -2398,7 +2423,18 @@ function buildMapParams(params, c) {
       key: "headingReference",
       label: "Medido",
       options: HEADING_REFERENCES,
-      help: () => (c.headingReference === "north" ? "Mismo rumbo en todas las líneas (0° = norte)" : "Gira con cada línea (0° = adelante)"),
+      help: () =>
+        c.headingReference === "north"
+          ? "Mismo rumbo en todas las líneas (0° = norte)"
+          : "Desde la primera línea (0° = adelante, 90° = derecha); no gira entre líneas",
+    });
+  }
+  if (c.heading !== "forward" && c.spacing !== "distance") {
+    toggleParam(params, c, {
+      key: "headingSpacing",
+      label: "Separar las líneas según el rumbo",
+      help: () => headingSpacingHelp(c),
+      rebuild: true,
     });
   }
   numberParam(params, c, {
@@ -3949,10 +3985,7 @@ function showPreviewFrame(follow = false) {
   showPreviewShots(state.photos, el);
 
   $("preview-label").textContent = state.label;
-  const above = c && TerrainFollow.follows(c) && state.kind !== "transit" ? " sobre el suelo" : "";
-  const stats = [`${num(state.altitude)} m${above}`];
-  if (timeline.photoCount) stats.push(`${state.photos} de ${timeline.photoCount} fotos`);
-  $("preview-stats").textContent = stats.join(" · ");
+  $("preview-stats").textContent = FlightPreview.stats(timeline, state);
   $("preview-time").textContent = clock(preview.time);
   $("preview-scrub").value = String(Math.round((preview.time / timeline.duration) * 1000));
   if (follow) keepInView(state.position);
