@@ -728,6 +728,25 @@ a.button {
   margin-top: 2px;
 }
 
+.mission-card .card-action {
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.mission-card:hover .card-action,
+.mission-card.hover .card-action,
+.mission-card .card-action:focus-visible {
+  opacity: 1;
+}
+
+/* En pantallas táctiles no hay "pasar por encima": el botón se ve siempre. */
+@media (hover: none) {
+  .mission-card .card-action {
+    opacity: 1;
+  }
+}
+
 .empty {
   color: var(--text-2);
   margin-top: 24px;
@@ -1046,10 +1065,12 @@ a.button {
 }
 
 .editor-footer {
-  padding: 12px 0 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 18px 16px;
   border-top: 1px solid var(--stroke);
   margin: 0 -18px;
-  padding-left: 18px;
 }
 
 /* ---------- Componentes del plan ---------- */

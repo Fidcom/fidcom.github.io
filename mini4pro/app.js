@@ -53,6 +53,7 @@ import {
   componentName,
   componentSummary,
   copyComponent,
+  duplicatePlan,
   endAltitude,
   formatDuration,
   hasGeometry,
@@ -86,9 +87,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261030c";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030c";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030c";
+} from "./planner.js?v=20261030d";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030d";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030d";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -560,11 +561,18 @@ function renderList() {
     card.className = "mission-card";
     card.innerHTML = `
       <div class="type"><svg><use href="#i-${planIcon(plan)}" /></svg></div>
-      <div class="body"><div class="name"></div><div class="meta"></div><div class="when"></div></div>`;
+      <div class="body"><div class="name"></div><div class="meta"></div><div class="when"></div></div>
+      <button class="icon-button card-action" type="button" title="Duplicar" aria-label="Duplicar"><svg><use href="#i-copy" /></svg></button>`;
     card.querySelector(".name").textContent = plan.name;
     card.querySelector(".meta").textContent = summary(plan);
     card.querySelector(".when").textContent = whenText(plan.updatedAt);
     card.addEventListener("click", () => openPlan(plan.id));
+    card.querySelector(".card-action").addEventListener("click", (event) => {
+      event.stopPropagation();
+      const copy = duplicateMission(plan);
+      renderList();
+      toast(`Copia creada: «${copy.name}»`);
+    });
     list.append(card);
 
     const group = L.featureGroup().addTo(listLayer);
@@ -3718,6 +3726,26 @@ async function readKml(file) {
   if (!found?.includes("<Placemark") && waylines) return waylines.async("string");
   return found;
 }
+
+/** Guarda una copia de `plan` como otra misión (otro id), lista para subir a GitHub. */
+function duplicateMission(plan) {
+  const copy = duplicatePlan(plan, Object.values(state.missions).map((m) => m.name));
+  state.missions[copy.id] = clone(copy);
+  state.dirty[copy.id] = true;
+  persist();
+  scheduleSync();
+  return copy;
+}
+
+$("plan-duplicate").addEventListener("click", () => {
+  if (!current) return;
+  if (!hasGeometry(current)) return toast("Primero marca la misión en el mapa", true);
+  // Los cambios ya están guardados: se sigue editando la copia y la original queda como está.
+  const copy = duplicateMission(current);
+  closeEditor();
+  openPlan(copy.id);
+  toast(`Ahora editas «${copy.name}»: la original quedó igual`);
+});
 
 $("plan-delete").addEventListener("click", () => {
   if (!current || !confirm(`¿Borrar «${current.name}»? También se borra del teléfono.`)) return;
