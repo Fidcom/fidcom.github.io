@@ -174,15 +174,15 @@ const photosFixture = {
 test("dónde se toma cada foto: los mismos puntos y tiempos que en el teléfono", () => {
   const plan = normalizePlan(structuredClone(photosFixture));
   const result = PlanPlanner.plan(plan);
-  near(result.durationSeconds, 2135.664379, 1e-5);
+  near(result.durationSeconds, 2124.985782, 1e-5);
   assert.equal(result.photoCount, 428);
   // [duración, fotos, puntos, primero, último, metros hasta el último]: lo que da PhotoPointsTest.kt.
   const expected = [
-    [1717.751466, 310, 310, [18.18, -65.8199833], [18.18000933, -65.8196167], 371.276486],
-    [190.733923, 63, 63, [18.18060008, -65.8199666], [18.18118143, -65.8192334], 647.33781],
+    [1620.402963, 310, 310, [18.18, -65.8199833], [18.18000933, -65.8196167], 371.276486],
+    [228.598802, 63, 63, [18.18060008, -65.8199666], [18.18118143, -65.8192334], 647.33781],
     [69.601707, 39, 13, [18.1815, -65.82], [18.18217735, -65.81950566], 96.964286],
     [31.370673, 7, 7, [18.18067303, -65.81905089], [18.18065337, -65.81909831], 120],
-    [28.878572, 6, 6, [18.1808, -65.8185], [18.1812, -65.8186], 69.392862],
+    [40.633600, 6, 6, [18.1808, -65.8185], [18.1812, -65.8186], 69.392862],
     [15, 3, 1, [18.1813, -65.819], [18.1813, -65.819], 0],
   ];
   result.items.forEach((item, i) => {
@@ -207,14 +207,14 @@ test("dónde se toma cada foto: los mismos puntos y tiempos que en el teléfono"
   near(byTime.photoSpacing / byTime.speed, 2, 1e-9);
 
   const timeline = FlightPreview.timeline(plan);
-  near(timeline.duration, 2135.664379, 1e-5);
+  near(timeline.duration, 2124.985782, 1e-5);
   assert.equal(timeline.shots.length, 428);
-  near(timeline.shots[10].time, 62.780103, 1e-5);
+  near(timeline.shots[10].time, 71.069385, 1e-5);
   near(timeline.shots[10].position[0], 18.18009689, 1e-8);
   near(timeline.shots[10].position[1], -65.8199833, 1e-8);
-  near(timeline.shots[60].time, 330.984615, 1e-5);
-  assert.equal(FlightPreview.photosBy(timeline, 62.780103), 11);
-  assert.equal(FlightPreview.photosBy(timeline, 62.78), 10);
+  near(timeline.shots[60].time, 328.775808, 1e-5);
+  assert.equal(FlightPreview.photosBy(timeline, 71.0694), 11);
+  assert.equal(FlightPreview.photosBy(timeline, 71.0693), 10);
 });
 
 test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () => {
@@ -226,6 +226,129 @@ test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () 
   }
   const jump = Geo.distance(normal.legs.at(-1).end, plan.legs[normal.legs.length].start);
   assert.ok(jump < 15, `salto entre pasadas ${jump}`);
+});
+
+/** Un mapa cruzado de 99 x 99 m con líneas cada 10 m (en 4.5, 14.5… 94.5) y fotos que pedirían cada `front` m. */
+const crossingMap = (front, gridPhotos = true) =>
+  map({
+    boundary: [
+      { x: 0, y: 0 },
+      { x: 99, y: 0 },
+      { x: 99, y: 99 },
+      { x: 0, y: 99 },
+    ].map(pr.toGeo),
+    altitude: 30,
+    pattern: "grid",
+    gridPhotos,
+    spacing: "distance",
+    sideDistance: 10,
+    frontDistance: front,
+  });
+
+const closest = (points) => {
+  let best = Infinity;
+  points.forEach((p, i) => points.slice(i + 1).forEach((q) => (best = Math.min(best, Math.hypot(q.x - p.x, q.y - p.y)))));
+  return best;
+};
+
+const assertOnePhotoAtEachCrossing = (shots) => {
+  for (let x = 0; x < 10; x++) {
+    for (let y = 0; y < 10; y++) {
+      const c = { x: 4.5 + 10 * x, y: 4.5 + 10 * y };
+      assert.equal(shots.filter((p) => Math.hypot(p.x - c.x, p.y - c.y) < 0.01).length, 1, `cruce ${c.x}, ${c.y}`);
+    }
+  }
+};
+
+test("fotos en los cruces: una en cada cruce y otra a la mitad, sin repetir", () => {
+  // Fotos pedidas cada 8 m: una en cada cruce y otra a la mitad, cada 5 m.
+  const c = crossingMap(8);
+  const plan = MapPlanner.plan(c);
+  assert.equal(plan.legs.length, 20);
+  near(plan.photoSpacing, 5, 1e-9);
+  // Primera pasada: 19 fotos por línea (de 4.5 a 94.5 m); segunda: solo las 9 de entre cruces.
+  assert.deepEqual([...new Set(plan.legs.slice(0, 10).map((leg) => leg.photos.length))], [19]);
+  assert.deepEqual([...new Set(plan.legs.slice(10).map((leg) => leg.photos.length))], [9]);
+  assert.equal(plan.positions, 280);
+  assert.equal(plan.photoCount, 280);
+  for (const leg of plan.legs) {
+    assert.deepEqual([...leg.photos].sort((p, q) => p - q), leg.photos);
+    assert.ok(leg.photos[0] >= 0 && leg.photos.at(-1) <= 1);
+  }
+  const shots = PhotoPoints.of(c, plan).map((p) => pr.toLocal(p.position));
+  assert.equal(shots.length, 280);
+  near(closest(shots), 5, 0.01, "fotos más juntas");
+  assertOnePhotoAtEachCrossing(shots);
+});
+
+test("fotos en los cruces: más seguidas si el traslape frontal lo pide", () => {
+  // Fotos pedidas cada 4 m y cruces cada 10 m: cada tramo entre cruces en 3 partes (3.33 m).
+  const c = crossingMap(4);
+  const plan = MapPlanner.plan(c);
+  near(plan.photoSpacing, 10 / 3, 1e-9);
+  const shots = PhotoPoints.of(c, plan).map((p) => pr.toLocal(p.position));
+  near(closest(shots), 10 / 3, 0.01, "fotos más juntas");
+  assertOnePhotoAtEachCrossing(shots);
+  // Sin la opción, el patrón cruzado sigue igual que siempre.
+  const plain = MapPlanner.plan(crossingMap(4, false));
+  near(plain.photoSpacing, 4, 1e-9);
+  assert.ok(plain.legs.every((leg) => leg.photos === undefined));
+});
+
+/** Un mapa cruzado girado con las fotos en los cruces: igual que en PhotoPointsTest.kt. */
+const crossingsFixture = {
+  version: 2,
+  id: "cruces",
+  name: "Cruces",
+  finishAction: "HOVER",
+  transitSpeed: 8,
+  takeoff: [18.1795, -65.8205],
+  components: [
+    {
+      id: "g",
+      type: "map",
+      boundary: [
+        [18.18, -65.82],
+        [18.1801, -65.8193],
+        [18.1807, -65.8192],
+        [18.1809, -65.8199],
+        [18.1804, -65.8203],
+      ],
+      altitude: 25,
+      direction: 20,
+      pattern: "grid",
+      gridPhotos: true,
+      frontOverlap: 85,
+      sideOverlap: 65,
+      photoSize: "12mp",
+      minPhotoInterval: 2,
+    },
+  ],
+};
+
+test("fotos en los cruces: los mismos puntos y tiempos que en el teléfono", () => {
+  const plan = normalizePlan(structuredClone(crossingsFixture));
+  const result = PlanPlanner.plan(plan);
+  const item = result.items[0];
+  const route = item.result;
+  near(route.durationSeconds, 1018.086971, 1e-5);
+  assert.equal(route.photoCount, 355);
+  near(route.photoSpacing, 3.141276042, 1e-8);
+  assert.deepEqual(
+    route.legs.map((leg) => leg.photos.length),
+    [6, 22, 29, 31, 30, 28, 26, 24, 9, 4, 20, 22, 23, 24, 25, 21, 10, 1],
+  );
+  const points = PhotoPoints.of(item.component, route);
+  assert.equal(points.length, 355);
+  near(points[0].position[0], 18.18036818, 1e-8);
+  near(points[0].position[1], -65.82026044, 1e-8);
+  near(points.at(-1).position[0], 18.18000406, 1e-8);
+  near(points.at(-1).position[1], -65.81998904, 1e-8);
+  near(points.at(-1).along, 1628.820527, 1e-5);
+  const timeline = FlightPreview.timeline(plan);
+  near(timeline.duration, 1045.199610, 1e-5);
+  assert.equal(timeline.shots.length, 355);
+  near(timeline.shots[20].time, 85.382784, 1e-5);
 });
 
 test("el patrón oblicuo agrega cuatro pasadas inclinadas, corridas hacia atrás", () => {
@@ -601,14 +724,14 @@ test("waypoints, foto y panorámica dan el mismo tiempo y las mismas fotos que e
   const result = PlanPlanner.plan(plan);
   // Los números que da PlanPlanner.kt con esta misma misión.
   // La foto y la panorámica en 48 MP: 5 s por foto, lo que necesita la cámara.
-  near(result.durationSeconds, 192.13, 0.01);
+  near(result.durationSeconds, 220.6389, 0.01);
   near(result.lengthMeters, 581.2151, 0.01);
   assert.equal(result.photoCount, 23);
   assert.equal(result.flown, 3);
   const [waypoints, photo, pano, future] = result.items;
-  near(waypoints.result.durationSeconds, 51.2896, 0.001);
+  near(waypoints.result.durationSeconds, 60.2735, 0.001);
   assert.equal(waypoints.result.photoCount, 11);
-  near(waypoints.approach.durationSeconds, 14.5862, 0.001);
+  near(waypoints.approach.durationSeconds, 21.0945, 0.001);
   assert.equal(photo.result.photoCount, 3);
   near(pano.result.durationSeconds, 45, 0.001);
   assert.equal(future.result, null);
@@ -722,7 +845,7 @@ test("corredor: las mismas pasadas, tiempo y fotos que en el teléfono", () => {
   // Empieza en el extremo más cerca del despegue.
   near(corridor.path[0][0], 18.1828666, 1e-6);
   near(corridor.path[0][1], -65.8173387, 1e-6);
-  near(result.durationSeconds, 964.1977, 0.01);
+  near(result.durationSeconds, 970.706, 0.01);
   near(result.lengthMeters, 2305.042, 0.01);
   assert.equal(CorridorPlanner.outline(plan.components[0]).length, 8);
   // Con ancho 0 y video, una sola pasada por la línea.
@@ -875,7 +998,7 @@ test("fachada: las mismas paradas, tiempo y fotos que en el teléfono", () => {
   const plan = normalizePlan(structuredClone(facadeFixture));
   const result = PlanPlanner.plan(plan);
   // Los números que da PlanPlanner.kt con esta misma misión.
-  near(result.durationSeconds, 2582.588255, 1e-5);
+  near(result.durationSeconds, 2602.113255, 1e-5);
   near(result.lengthMeters, 3484.38737, 1e-5);
   assert.equal(result.photoCount, 265);
   const [a, b, c] = result.items.map((item) => item.result);
@@ -899,7 +1022,7 @@ test("fachada: las mismas paradas, tiempo y fotos que en el teléfono", () => {
   near(c.durationSeconds, 1759.650755, 1e-5);
   near(c.faceMeters, 383.880983, 1e-5);
   near(c.stations[0].heading, 307.406542, 1e-5);
-  near(result.items[2].approach.durationSeconds, 9.840576, 1e-5);
+  near(result.items[2].approach.durationSeconds, 16.34891, 1e-5);
 });
 
 test("fachada: columnas a la distancia, mirando a la pared, y filas parejas", () => {
@@ -1011,7 +1134,7 @@ test("zonas: los mismos tránsitos, desvíos y avisos que en el teléfono", () =
   const plan = normalizePlan(structuredClone(zonesFixture));
   const result = PlanPlanner.plan(plan);
   assert.equal(result.flown, 3);
-  near(result.durationSeconds, 197.156033, 1e-5);
+  near(result.durationSeconds, 239.911833, 1e-5);
   near(result.lengthMeters, 975.874268, 1e-5);
   assert.equal(result.photoCount, 3);
   near(result.items[3].result.durationSeconds, 27.833333, 1e-5);
@@ -1020,7 +1143,7 @@ test("zonas: los mismos tránsitos, desvíos y avisos que en el teléfono", () =
     [2, 1, 0, 2],
   );
   [236.519744, 245.946193, 143.255724, 234.529276].forEach((length, i) => near(result.transits[i].lengthMeters, length, 1e-5));
-  near(result.transits[0].durationSeconds, 39.564968, 1e-5);
+  near(result.transits[0].durationSeconds, 60.262434, 1e-5);
   const expected = [
     [18.18021017, -65.81999455],
     [18.18108983, -65.81999455],
@@ -1109,7 +1232,7 @@ test("comandos: tiempo, fotos, alturas y sin punto donde terminó lo anterior", 
   const result = PlanPlanner.plan({ ...newPlan("C", [photo, loose]), takeoff: at(0, 0) });
   assert.deepEqual(result.items[1].result.path, [photo.position]);
   assert.equal(result.items[1].approach.lengthMeters, 0);
-  near(result.items[1].approach.durationSeconds, 10 / 3, 1e-9);
+  near(result.items[1].approach.durationSeconds, 10 / 3 + 1, 1e-9);
   assert.equal(PlanPlanner.plan(newPlan("C", [loose])).flown, 0);
 });
 

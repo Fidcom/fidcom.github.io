@@ -1812,27 +1812,48 @@ body.previewing .zone-warning {
 }
 
 .preview-drone.shot .flash {
-  animation: preview-shot 0.45s ease-out;
+  animation: preview-shot 0.8s ease-out;
 }
 
+/* Al tomar la foto el dron se pone amarillo y crece un momento, con un halo blanco. */
 .preview-drone.shot .body {
-  animation: preview-shot-body 0.45s ease-out;
+  animation: preview-shot-body 0.8s ease-out;
+}
+
+.preview-drone.shot .body svg {
+  animation: preview-shot-arrow 0.8s ease-out;
 }
 
 @keyframes preview-shot {
   from {
     opacity: 1;
     transform: scale(1);
+    border-width: 4px;
+    background: rgba(255, 214, 10, 0.45);
   }
   to {
     opacity: 0;
-    transform: scale(2.6);
+    transform: scale(3.4);
+    border-width: 1px;
+    background: rgba(255, 214, 10, 0);
   }
 }
 
 @keyframes preview-shot-body {
-  from {
+  0%,
+  45% {
     background: #ffd60a;
+    transform: scale(1.4);
+    box-shadow:
+      0 0 0 4px rgba(255, 255, 255, 0.95),
+      0 0 18px 8px rgba(255, 214, 10, 0.9);
+  }
+}
+
+@keyframes preview-shot-arrow {
+  0%,
+  45% {
+    fill: #1c1c1e;
   }
 }
 
