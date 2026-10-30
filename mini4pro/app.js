@@ -225,15 +225,63 @@ map.getPane("cones").style.pointerEvents = "none";
 const listLayer = L.layerGroup().addTo(map);
 const shapeLayer = L.layerGroup();
 const handleLayer = L.layerGroup();
-// Los puntos de las fotos van sobre las rutas y debajo de los marcadores. Se dibujan en un lienzo:
-// un mapa grande puede tener cientos.
+// Los puntos de las fotos van sobre las rutas y debajo de los marcadores. Se dibujan en lienzos:
+// un mapa grande puede tener miles. Las fotos ya tomadas en la vista previa van encima de las que faltan.
+map.createPane("photoDots").style.zIndex = 440;
+map.getPane("photoDots").style.pointerEvents = "none";
 map.createPane("photos").style.zIndex = 450;
 map.getPane("photos").style.pointerEvents = "none";
 const photoRenderer = L.canvas({ padding: 0.3, pane: "photos" });
 const PHOTO_COLOR = "#ffd60a";
-const PHOTOS_KEY = "mini4pro.photoMarkers";
-/** Si se ven los puntos de las fotos (se recuerda en este navegador). */
-let photoMarkers = storage.get(PHOTOS_KEY) === "1";
+
+/**
+ * Los puntos de las fotos del editor, todos en un solo lienzo y sin una capa por foto: con miles de
+ * fotos, un circleMarker por foto trababa los deslizadores.
+ */
+const PhotoDots = L.Canvas.extend({
+  /** `dots`: [{ position, big, dim }]. */
+  setDots(dots) {
+    this._dots = dots;
+    if (this._map) this._redraw();
+  },
+
+  _draw() {
+    L.Canvas.prototype._draw.call(this);
+    if (!this._dots?.length) return;
+    // Un trazo por estilo: tenues debajo y, encima, los del componente abierto.
+    const paths = new Map();
+    const { min, max } = this._bounds;
+    for (const dot of this._dots) {
+      const radius = dot.big ? 4.5 : 3;
+      const p = this._map.latLngToLayerPoint(dot.position);
+      if (p.x < min.x - radius || p.y < min.y - radius || p.x > max.x + radius || p.y > max.y + radius) continue;
+      const key = `${dot.dim ? 0 : 1}${dot.big ? 1 : 0}`;
+      if (!paths.has(key)) paths.set(key, new Path2D());
+      const path = paths.get(key);
+      path.moveTo(p.x + radius, p.y);
+      path.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    }
+    const ctx = this._ctx;
+    ctx.save();
+    ctx.fillStyle = PHOTO_COLOR;
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 1;
+    for (const key of [...paths.keys()].sort()) {
+      const dim = key[0] === "0";
+      ctx.globalAlpha = dim ? 0.35 : 1;
+      ctx.fill(paths.get(key));
+      ctx.globalAlpha = dim ? 0.25 : 0.6;
+      ctx.stroke(paths.get(key));
+    }
+    ctx.restore();
+  },
+});
+const photoDots = new PhotoDots({ padding: 0.3, pane: "photoDots" });
+// Se ven en cuanto se abre una misión, para ver cómo cambian mientras se ajustan los parámetros sin
+// correr la vista previa. El botón de la cámara los esconde y eso se recuerda en este navegador.
+const HIDE_PHOTOS_KEY = "mini4pro.hidePhotoMarkers";
+/** Si se ven los puntos de las fotos. */
+let photoMarkers = storage.get(HIDE_PHOTOS_KEY) !== "1";
 
 /** Espacio que tapa el panel, para centrar la misión en la parte visible del mapa. */
 function fitPadding() {
@@ -604,6 +652,7 @@ function openPlan(id, plan = null, componentId = null) {
   $("edit-tools").hidden = false;
   map.removeLayer(listLayer);
   shapeLayer.addTo(map);
+  photoDots.addTo(map);
   handleLayer.addTo(map);
   map.doubleClickZoom.disable();
   showView(componentId);
@@ -645,6 +694,8 @@ function closeEditor() {
   shapeLayer.clearLayers();
   handleLayer.clearLayers();
   map.removeLayer(shapeLayer);
+  photoDots.setDots([]);
+  map.removeLayer(photoDots);
   map.removeLayer(handleLayer);
   listLayer.addTo(map);
   map.doubleClickZoom.enable();
@@ -716,7 +767,7 @@ function redrawShapes() {
   zoneViolations = ZonePlanner.violations(current, planResult);
   // Un anillo rojo donde la ruta entra en una zona.
   for (const { at } of zoneViolations) shapeLayer.addLayer(L.circleMarker(at, { radius: 9, color: DANGER, weight: 3, fill: false, interactive: false }));
-  if (photoMarkers) drawPhotoMarkers(planResult);
+  photoDots.setDots(photoMarkers ? photoDotsOf(planResult) : []);
   renderZoneWarning();
   renderStats();
   helpUpdaters.forEach((update) => update());
@@ -726,30 +777,20 @@ function redrawShapes() {
   $("tool-clear").disabled = !component || !anchorOf(component);
 }
 
-/** Un punto amarillo donde se toma cada foto (más grande donde se toman varias: AEB, panorámica, comandos). */
-function drawPhotoMarkers(result) {
-  for (const item of result.items) {
+/**
+ * Un punto amarillo donde se toma cada foto (más grande donde se toman varias: AEB, panorámica,
+ * comandos); los de los otros componentes, tenues.
+ */
+function photoDotsOf(result) {
+  return result.items.flatMap((item) => {
     const dim = selectedId !== null && item.component.id !== selectedId;
-    for (const p of PhotoPoints.of(item.component, item.result)) {
-      shapeLayer.addLayer(
-        L.circleMarker(p.position, {
-          renderer: photoRenderer,
-          radius: p.shots > 1 ? 4.5 : 3,
-          color: "#000",
-          weight: 1,
-          opacity: dim ? 0.25 : 0.6,
-          fillColor: PHOTO_COLOR,
-          fillOpacity: dim ? 0.35 : 1,
-          interactive: false,
-        }),
-      );
-    }
-  }
+    return PhotoPoints.of(item.component, item.result).map((p) => ({ position: p.position, big: p.shots > 1, dim }));
+  });
 }
 
 function setPhotoMarkers(on, redraw = true) {
   photoMarkers = on;
-  storage.set(PHOTOS_KEY, on ? "1" : "0");
+  storage.set(HIDE_PHOTOS_KEY, on ? null : "1");
   $("tool-photos").classList.toggle("active", on);
   $("tool-photos").title = on ? "Esconder los puntos de las fotos" : "Ver dónde se toma cada foto";
   if (redraw && current) redrawShapes();
