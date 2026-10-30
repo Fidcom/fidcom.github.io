@@ -2881,6 +2881,45 @@ export const PhotoPoints = {
   },
 };
 
+// ---- Partes de una misión ----
+
+/**
+ * Volar (o ver) solo una parte de una misión: desde un componente hasta el final o uno solo, como
+ * MissionParts.kt de la app (que además repite uno en vuelo y vuelve a donde iba).
+ */
+export const MissionParts = {
+  /** Los componentes que se pueden elegir: los que se vuelan (encendidos y con ruta), en orden. */
+  flyable(plan) {
+    return PlanPlanner.plan(plan).items.filter((item) => item.component.enabled && item.result);
+  },
+
+  /** Los ids que se vuelan eligiendo `id` en `mode` ("from": ese y los que siguen; "only" o "repeat": ese). */
+  parts(plan, id, mode) {
+    if (mode !== "from") return [id];
+    const ids = this.flyable(plan).map((item) => item.component.id);
+    const index = ids.indexOf(id);
+    return index < 0 ? [id] : ids.slice(index);
+  },
+
+  /** La misión con solo `parts` encendidos (las zonas quedan igual); null = la misión entera. */
+  restrict(plan, parts) {
+    if (!parts) return plan;
+    return {
+      ...plan,
+      components: plan.components.map((c) => (c.type === "zone" || parts.includes(c.id) ? c : { ...c, enabled: false })),
+    };
+  },
+
+  /** "Mapa 2", "desde Mapa 2 (3 componentes)" o "toda la misión". */
+  describe(plan, parts) {
+    if (!parts) return "toda la misión";
+    const items = this.flyable(this.restrict(plan, parts));
+    if (!items.length) return "nada";
+    const name = `${componentName(items[0].component)} ${items[0].number}`;
+    return items.length === 1 ? name : `desde ${name} (${items.length} componentes)`;
+  },
+};
+
 // ---- Vista previa ----
 
 /**

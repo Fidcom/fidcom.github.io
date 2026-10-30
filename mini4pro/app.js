@@ -73,6 +73,7 @@ import {
   num,
   importKml as readKmlText,
   FlightPreview,
+  MissionParts,
   exportKml,
   planPoints,
   componentPoints,
@@ -85,9 +86,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261030a";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030a";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030a";
+} from "./planner.js?v=20261030b";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030b";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030b";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -1592,6 +1593,7 @@ function buildPanel() {
   const component = selected();
   if (component) {
     buildComponentHeader(component);
+    if (selectedPoint === null) partsRow(container, component);
     if (component.type === "map") buildMapParams(container, component);
     else if (component.type === "corridor") buildCorridorParams(container, component);
     else if (component.type === "orbit") buildOrbitParams(container, component);
@@ -2005,6 +2007,32 @@ function buildPlanBody(body) {
     ["Exportar KML", hasGeometry(current) ? () => exportPlan(false) : null],
   ]);
   note(body, "Para verla en 3D en Google Earth. El archivo trae la misión entera: al importarlo aquí o en el teléfono queda igual.");
+}
+
+/**
+ * Ver el vuelo desde este componente o solo este, como en el teléfono, que además los vuela así
+ * (el botón ⟳ de la tarjeta de la misión) y en vuelo puede repetir uno y volver a donde iba.
+ */
+function partsRow(params, component) {
+  const flyable = MissionParts.flyable(current);
+  if (flyable.length < 2 || !flyable.some((item) => item.component.id === component.id)) return;
+  const from = MissionParts.parts(current, component.id, "from");
+  const row = document.createElement("div");
+  row.className = "button-row parts-row";
+  const add = (label, parts, primary) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `button ${primary ? "primary" : "outline"} small`;
+    button.textContent = label;
+    if (primary) button.insertAdjacentHTML("afterbegin", '<svg><use href="#i-play" /></svg>');
+    button.title = `Ver el vuelo: ${MissionParts.describe(current, parts)}`;
+    button.addEventListener("click", () => openPreview(parts));
+    row.append(button);
+  };
+  if (from.length > 1) add("Ver desde aquí", from, true);
+  add("Ver solo este", [component.id], from.length === 1);
+  if (from.length === 1) row.classList.add("single");
+  params.append(row);
 }
 
 /** Tiempo de cada tramo del plan, como el "Mission Estimate" de Dronelink. */
@@ -3811,11 +3839,13 @@ const clock = (seconds) => {
   return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 };
 
-function openPreview() {
+/** La vista previa de la misión, o solo de `parts` (los ids de los componentes que se vuelan). */
+function openPreview(parts = null) {
   if (!current) return;
   closePreview();
-  const timeline = FlightPreview.timeline(current);
+  const timeline = FlightPreview.timeline(MissionParts.restrict(current, parts));
   if (!timeline.segments.length) return toast("La misión todavía no tiene nada que volar", true);
+  if (parts) toast(`Vista previa: ${MissionParts.describe(current, parts)} · ${clock(timeline.duration)}`);
   preview.timeline = timeline;
   preview.time = 0;
   const path = [timeline.segments[0].from.position, ...timeline.segments.map((s) => s.to.position)];
