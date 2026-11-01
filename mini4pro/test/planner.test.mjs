@@ -5,7 +5,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   decodeDronelink,
+  exportDronelink,
+  dronelinkBearing,
+  dronelinkDestination,
+  dronelinkDistance,
+  dronelinkFileName,
+  DRONELINK_NO_LIMIT,
   importDronelink,
+  packDronelink,
+  unpackDronelink,
   CorridorPlanner,
   FacadePlanner,
   Geo,
@@ -1876,4 +1884,157 @@ test("Dronelink: los demás archivos no son de Dronelink", () => {
   assert.equal(importDronelink('{"version":2,"components":[]}'), null);
   assert.equal(importDronelink("hola"), null);
   assert.ok(importDronelink(DRONELINK_OTHERS));
+});
+
+// ---- Exportar a Dronelink: los mismos casos que DronelinkExportTest.kt, con la misma misión ----
+
+const EXPORT_MISSION = () => normalizePlan(JSON.parse(readFileSync(new URL("./exportar.json", import.meta.url), "utf8")));
+/** Identificadores fijos: "id1", "id2"... */
+const fixedIds = () => {
+  let n = 0;
+  return () => `id${++n}`;
+};
+const exportTest = (plan) => exportDronelink(plan, plan.takeoff, fixedIds());
+const withoutId = (c) => ({ ...c, id: "x" });
+
+test("Dronelink: exportar y volver a importar da la misma misión", () => {
+  const plan = EXPORT_MISSION();
+  const result = exportTest(plan);
+  assert.deepEqual(result.notes, ["Lo que sigue el terreno va sobre el suelo (AGL): Dronelink baja sus propios datos del terreno."]);
+
+  const back = importDronelink(result.text);
+  assert.deepEqual(back.skipped, []);
+  const again = back.plan;
+  assert.equal(again.name, "Prueba exportar");
+  assert.deepEqual(again.takeoff, [18.2, -65.9]);
+  assert.equal(again.finishAction, "LAND");
+  assert.equal(again.transitSpeed, 6);
+  // Dronelink no tiene "el ángulo del componente": cada punto lleva el suyo.
+  const expected = plan.components.map((c) =>
+    c.type === "waypoints" ? { ...c, points: c.points.map((p) => ({ ...p, gimbalPitch: p.gimbalPitch ?? c.gimbalPitch })) } : c,
+  );
+  assert.deepEqual(normalizePlan(again).components.map(withoutId), normalizePlan({ ...plan, components: expected }).components.map(withoutId));
+});
+
+/** El kernel de Dronelink pide el "type" de cada objeto (menos los ángulos del gimbal por canal). */
+function assertEveryObjectTyped(value, key = "") {
+  if (Array.isArray(value)) {
+    for (const item of value) assertEveryObjectTyped(item, key);
+  } else if (value && typeof value === "object") {
+    if (key !== "gimbalOrientations" && key !== "features") assert.ok("type" in value, `${key} sin type`);
+    for (const [k, v] of Object.entries(value)) assertEveryObjectTyped(v, k);
+  }
+}
+
+test("Dronelink: el plan exportado tiene lo que Dronelink lee", () => {
+  const { json } = exportTest(EXPORT_MISSION());
+  assert.equal(json.type, "PlanComponent");
+  assert.equal(json.coordinate.latitude, 18.2);
+  assert.equal(json.completeAction, "autoLand");
+  const children = json.rootComponent.childComponents;
+  assert.deepEqual(
+    children.map((c) => c.type),
+    ["MapComponent", "MapComponent", "OrbitComponent", "OrbitComponent", "PathComponent", "PhotoComponent", "PanoComponent"],
+  );
+  assert.equal(json.restrictionZones.length, 2);
+  assertEveryObjectTyped(json);
+
+  const map = children[0];
+  assert.equal(map.pattern, "grid");
+  assert.ok(Math.abs(map.frontOverlap - 0.8) < 1e-12);
+  assert.ok(Math.abs(map.direction - 0.5235987755982988) < 1e-12);
+  assert.equal(map.droneOrientationStrategy, "custom");
+  const start = map.approachComponent.destinationOffset;
+  assert.ok(Math.abs(start.direction - 1.4215325) < 1e-7);
+  assert.ok(Math.abs(start.magnitude - 74.8576) < 1e-4);
+  assert.deepEqual(map.preferredStartOffset, start);
+
+  const corridor = children[1];
+  assert.equal(corridor.pattern, "linear");
+  assert.equal(corridor.mapPatternLinearStrategy, "width");
+  assert.equal(corridor.mapPatternLinearCorridorWidth, 60);
+  assert.equal(corridor.approachComponent.altitudeRange.altitude.system, "agl");
+
+  const orbit = children[2];
+  assert.equal(orbit.direction, "counterclockwise");
+  assert.ok(Math.abs(orbit.circumference - 3 * Math.PI) < 1e-12);
+  assert.equal(orbit.droneOrientation.zReference, "path");
+  assert.ok(Math.abs(orbit.droneOrientation.z - Math.PI / 2) < 1e-12);
+  // El "Orbit Start" está sobre el círculo: el radio es la distancia del centro al inicio.
+  const center = dronelinkDestination([18.2, -65.9], orbit.centerOffset.direction, orbit.centerOffset.magnitude);
+  const orbitStart = orbit.approachComponent.destinationOffset;
+  const first = dronelinkDestination([18.2, -65.9], orbitStart.direction, orbitStart.magnitude);
+  assert.ok(Math.abs(dronelinkDistance(center, first) - 35) < 0.01);
+  assert.ok(Math.abs(dronelinkBearing(center, first) - 250) < 0.01);
+  // Mirando al centro con el objetivo en el suelo: sin ángulo del gimbal.
+  assert.ok(!("gimbalOrientations" in children[3]));
+
+  // Dronelink pone otro primer punto si no coincide con el inicio de la ruta.
+  const path = children[4];
+  assert.deepEqual(path.waypoints[0].offset, path.approachComponent.destinationOffset);
+  assert.equal(path.waypoints[0].marker.droneOrientation.zReference, "north");
+  assert.equal(path.waypoints[1].marker.droneOrientation.zReference, "path");
+
+  const zone = json.restrictionZones[1].zone;
+  assert.equal(zone.shape, "polygon");
+  assert.equal(zone.minAltitude.value, 10);
+  assert.equal(zone.maxAltitude.value, DRONELINK_NO_LIMIT);
+});
+
+test("Dronelink: avisa lo que cambia al exportar", () => {
+  const corner = [
+    [18.2005, -65.9005],
+    [18.2008, -65.8996],
+    [18.2001, -65.8993],
+  ];
+  const plan = newPlan("Notas", [
+    { ...newMapComponent(corner), name: "Lote", pattern: "oblique", photoType: "aeb5" },
+    { ...newOrbitComponent([18.201, -65.9]), poiAltitude: 15 },
+    newWaypointsComponent([{ ...newWaypoint([18.2, -65.901], 30), action: "photo" }]),
+    { ...newPanoComponent([18.2, -65.9]), panoType: "wide" },
+    newFacadeComponent("line", corner.slice(0, 2)),
+    newCommandsComponent(),
+    { ...newPhotoComponent([18.2, -65.9]), enabled: false },
+  ]);
+  plan.takeoff = [18.2, -65.9];
+  const result = exportTest(plan);
+  assert.deepEqual(result.notes, [
+    "Lote: Dronelink no tiene el patrón oblicuo, sale como normal.",
+    "Lote: Dronelink usa el AEB de la cámara (sale como AEB 3).",
+    "Órbita: Dronelink apunta la cámara al centro en el suelo.",
+    "Waypoints: las fotos y esperas de los puntos no pasan a Dronelink.",
+    "Panorama: Dronelink solo tiene panorámica esférica u horizontal (sale esférica).",
+    "No pasan a Dronelink: Fachada, Comandos.",
+    "Un componente apagado no se exportó.",
+  ]);
+  assert.equal(result.json.rootComponent.childComponents.length, 4);
+});
+
+test("Dronelink: comprime como Dronelink", () => {
+  const json = decodeDronelink(DRONELINK_FIXTURE);
+  const packed = packDronelink(json);
+  assert.equal(unpackDronelink(packed), json);
+  assert.equal(decodeDronelink(packed), json);
+  assert.ok(packed.length < json.length / 3, `${packed.length} letras para ${json.length}`);
+  // La última letra dice si sobra un byte de relleno.
+  assert.ok(packed.charCodeAt(packed.length - 1) >= 32768);
+
+  let seed = 7;
+  const random = (n) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed % n;
+  };
+  const letters = ["a", "b", "c", "d", "e", "ñ", "é", "{", "}", '"', ":", ",", ".", "0", "1", "7", " ", "🚁"];
+  for (const length of [1, 2, 3, 4, 5, 15, 16, 31, 32, 33, 100, 1000, 40000]) {
+    let text = "";
+    while (text.length < length) text += letters[random(letters.length)];
+    assert.equal(unpackDronelink(packDronelink(text)), text);
+    const repeated = Array.from({ length: 5 }, () => letters[random(letters.length)]).join("").repeat(Math.floor(length / 5) + 1);
+    assert.equal(unpackDronelink(packDronelink(repeated)), repeated);
+  }
+});
+
+test("Dronelink: el nombre del archivo", () => {
+  assert.equal(dronelinkFileName("Finca / norte"), "Finca norte.dronelink");
+  assert.equal(dronelinkFileName("?"), "Mision.dronelink");
 });

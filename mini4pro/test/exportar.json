@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "id": "prueba-exportar",
+  "name": "Prueba exportar",
+  "updatedAt": 0,
+  "finishAction": "LAND",
+  "takeoff": [18.2, -65.9],
+  "transitSpeed": 6,
+  "components": [
+    {"id": "mapa", "type": "map", "name": "Techo", "altitude": 40, "captureMode": "photo",
+     "boundary": [[18.2005, -65.9005], [18.2008, -65.8996], [18.2001, -65.8993], [18.1998, -65.9002]],
+     "frontOverlap": 80, "sideOverlap": 65, "direction": 30, "pattern": "grid", "start": [18.2001, -65.8993],
+     "gimbalPitch": -80, "maxSpeed": 10, "minPhotoInterval": 5, "photoSize": "48mp", "capturePriority": "time",
+     "photoType": "aeb3", "captureSpeed": 0, "spacing": "distance", "frontDistance": 12, "sideDistance": 15,
+     "heading": "custom", "headingAngle": 45, "headingReference": "path", "verifyFileCreated": true},
+    {"id": "corredor", "type": "corridor", "altitude": 50, "terrainFollow": true, "captureMode": "photo",
+     "path": [[18.201, -65.901], [18.203, -65.899], [18.204, -65.896]], "width": 60,
+     "frontOverlap": 75, "sideOverlap": 60, "gimbalPitch": -90, "maxSpeed": 9, "minPhotoInterval": 5,
+     "photoSize": "48mp", "photoType": "single", "captureSpeed": 2.5},
+    {"id": "orbita", "type": "orbit", "name": "Torre", "altitude": 30, "captureMode": "video",
+     "center": [18.1995, -65.8985], "radius": 35, "finalAltitude": 45, "finalRadius": 40, "clockwise": false,
+     "rotations": 1.5, "startBearing": 250, "speed": 3.5, "heading": "outward", "headingAngle": 0,
+     "gimbalPitch": -15},
+    {"id": "orbita2", "type": "orbit", "altitude": 25, "captureMode": "photo",
+     "center": [18.1992, -65.9008], "radius": 20, "clockwise": true, "rotations": 1, "startBearing": 90,
+     "speed": 4, "heading": "center", "poiAltitude": 0, "gimbalPitch": -20},
+    {"id": "ruta", "type": "waypoints", "name": "Ruta", "altitude": 35, "captureMode": "video",
+     "speed": 6, "gimbalPitch": -30,
+     "points": [
+       {"position": [18.2012, -65.9003], "altitude": 35, "heading": 90, "gimbalPitch": -45},
+       {"position": [18.2016, -65.8998], "altitude": 40},
+       {"position": [18.2013, -65.8991], "altitude": 45, "heading": 200, "gimbalPitch": -10}
+     ]},
+    {"id": "foto", "type": "photo", "altitude": 25, "position": [18.1996, -65.8999], "heading": 315,
+     "gimbalPitch": -45, "photoType": "aeb3"},
+    {"id": "pano", "type": "pano", "altitude": 60, "terrainFollow": true, "position": [18.2003, -65.8988],
+     "panoType": "sphere", "heading": 120},
+    {"id": "zona", "type": "zone", "name": "Antena", "shape": "circle",
+     "boundary": [[18.2007, -65.9012], [18.2009, -65.9012]], "minAltitude": null, "maxAltitude": 60},
+    {"id": "zona2", "type": "zone", "shape": "polygon",
+     "boundary": [[18.1990, -65.8995], [18.1990, -65.8990], [18.1986, -65.8992]], "minAltitude": 10, "maxAltitude": null}
+  ]
+}

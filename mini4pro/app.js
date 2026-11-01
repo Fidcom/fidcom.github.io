@@ -74,6 +74,8 @@ import {
   num,
   importKml as readKmlText,
   importDronelink,
+  exportDronelink,
+  dronelinkFileName,
   FlightPreview,
   MissionParts,
   exportKml,
@@ -88,9 +90,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261101a";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261101a";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261101a";
+} from "./planner.js?v=20261101b";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261101b";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261101b";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -2059,6 +2061,8 @@ function buildPlanBody(body) {
     ["Exportar KML", hasGeometry(current) ? () => exportPlan(false) : null],
   ]);
   note(body, "Para verla en 3D en Google Earth. El archivo trae la misión entera: al importarlo aquí o en el teléfono queda igual.");
+  buttonRow(body, [["Exportar a Dronelink", hasGeometry(current) ? () => exportDronelinkFile() : null]]);
+  note(body, "Un archivo .dronelink: en la web de Dronelink usa Importar y elígelo. Queda como un plan nuevo de Dronelink.");
 }
 
 /**
@@ -3766,6 +3770,26 @@ async function exportPlan(kmz) {
   toast(ground ? `Exportado ${link.download}` : `Exportado ${link.download} (sin datos del terreno: alturas sobre el suelo)`);
 }
 
+/** Guarda la misión como archivo .dronelink, para importarla en Dronelink. Avisa lo que no pasa igual. */
+function exportDronelinkFile() {
+  const plan = current;
+  const takeoff = plan && hasGeometry(plan) && plan.components.some((c) => c.enabled) ? takeoffOf(plan) : null;
+  if (!takeoff) return toast("La misión todavía no tiene nada que exportar", true);
+  let result;
+  try {
+    result = exportDronelink(plan, takeoff);
+  } catch (error) {
+    return toast(`No se pudo exportar: ${error.message}`, true);
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([result.text], { type: "application/octet-stream" }));
+  link.download = dronelinkFileName(plan.name);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+  if (result.notes.length) toast(`Exportado ${link.download}. ${result.notes.join(" ")}`, false, 9000);
+  else toast(`Exportado ${link.download}`);
+}
+
 /**
  * Un KMZ es un ZIP con el KML adentro (DJI lo guarda en wpmz/template.kml). Las rutas de DJI Fly
  * (y las que exporta la app del teléfono) traen los puntos solo en waylines.wpml.
@@ -4206,13 +4230,13 @@ document.addEventListener("click", (event) => {
 // ---------- Avisos ----------
 
 let toastTimer = null;
-function toast(message, error = false) {
+function toast(message, error = false, duration = error ? 5000 : 2500) {
   const el = $("toast");
   el.textContent = message;
   el.classList.toggle("error", error);
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), error ? 5000 : 2500);
+  toastTimer = setTimeout(() => (el.hidden = true), duration);
 }
 
 // ---------- Sincronización ----------
