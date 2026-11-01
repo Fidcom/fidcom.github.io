@@ -2,7 +2,10 @@
 // Correr con: node --test mini4pro/test/planner.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
+  decodeDronelink,
+  importDronelink,
   CorridorPlanner,
   FacadePlanner,
   Geo,
@@ -1677,4 +1680,200 @@ test("duplicar da otra misión con los mismos componentes", () => {
   assert.equal(saved.id, copy.id);
   assert.deepEqual(saved.components.map((c) => c.id), ["c1", "c2", "c9"]);
   assert.equal(saved.components[2].type, "tower");
+});
+
+// ---- Dronelink: los mismos casos y números que DronelinkImportTest.kt ----
+
+// ejemplo.dronelink es un plan real de Dronelink (un Map y un Orbit) movido a otro lugar.
+const DRONELINK_FIXTURE = readFileSync(new URL("./ejemplo.dronelink", import.meta.url), "utf8");
+
+/** Un plan sin comprimir con los demás tipos de componentes y dos zonas. */
+const DRONELINK_OTHERS = `
+{"type":"PlanComponent","descriptors":{"type":"Descriptors","name":"Prueba"},
+ "coordinate":{"type":"GeoCoordinate","latitude":18.2,"longitude":-65.9},
+ "takeoffOffset":{"type":"Vector2","direction":3.141592653589793,"magnitude":10},
+ "completeAction":"autoLand",
+ "droneMotionLimits":{"position":{"x":{"velocity":{"max":20}}}},
+ "rootComponent":{"type":"ListComponent","reference":{"source":"plan"},"childComponents":[
+   {"type":"ListComponent","childComponents":[
+     {"type":"PathComponent","reference":{"source":"plan"},"descriptors":{"name":"Ruta"},
+      "droneMotionLimits":{"position":{"x":{"velocity":{"max":3}}}},
+      "approachComponent":{"type":"DestinationComponent","destinationOffset":{"direction":0,"magnitude":0},"altitudeRange":{"altitude":{"system":"agl","value":40}}},
+      "cameraCaptureConfigurations":[{"channel":0,"captureType":"video"}],
+      "waypoints":[
+        {"offset":{"direction":0,"magnitude":100},"marker":{"altitude":{"system":"agl","value":50},"droneOrientation":{"z":1.5707963267948966,"zReference":"north"},"gimbalOrientations":{"0":{"x":-0.5235987755982988}}}},
+        {"offset":{"direction":1.5707963267948966,"magnitude":100}},
+        {"offset":{"direction":3.141592653589793,"magnitude":50},"marker":{"altitude":{"system":"msl","value":80}}}
+      ]}
+   ]},
+   {"type":"PhotoComponent","reference":{"source":"input","input":{"coordinate":{"latitude":18.21,"longitude":-65.91}}},
+    "approachComponent":{"destinationOffset":{"direction":-1.5707963267948966,"magnitude":20},"altitudeRange":{"altitude":{"system":"atl","value":25}}},
+    "heading":-0.7853981633974483,"cameraPhotoMode":"aeb","gimbalOrientations":{"0":{"x":-0.7853981633974483}}},
+   {"type":"PanoComponent","approachComponent":{"destinationOffset":{"direction":0.7853981633974483,"magnitude":30},"altitudeRange":{"altitude":{"system":"atl","value":60}}},"pattern":"horizontal","heading":3.141592653589793},
+   {"type":"MapComponent","pattern":"linear","mapPatternLinearStrategy":"passCount","mapPatternLinearPassCount":3,"frontOverlap":0.8,"sideOverlap":0.6,
+    "approachComponent":{"destinationOffset":{"direction":0,"magnitude":0},"altitudeRange":{"altitude":{"system":"atl","value":50}}},
+    "boundaryPoints":[{"offset":{"direction":0,"magnitude":200}},{"offset":{"direction":0.5,"magnitude":400}}]},
+   {"type":"OrbitComponent","direction":"counterclockwise","circumference":9.42477796076938,"finalRadius":40,"finalAltitude":{"system":"atl","value":45},
+    "centerOffset":{"direction":1.5707963267948966,"magnitude":500},
+    "approachComponent":{"destinationOffset":{"direction":1.5707963267948966,"magnitude":530},"altitudeRange":{"altitude":{"system":"atl","value":30}}},
+    "droneOrientation":{"z":0.5,"zReference":"north"},"gimbalOrientations":{"0":{"x":-0.2}}},
+   {"type":"FacadeComponent"},
+   {"type":"CommandComponent"},
+   {"type":"CommandComponent"}
+ ]},
+ "restrictionZones":[
+   {"type":"PlanRestrictionZone","descriptors":{"name":"Antena"},"zone":{"type":"Zone","shape":"circle","reference":{"source":"plan"},
+     "minAltitude":{"system":"atl","value":0},"maxAltitude":{"system":"atl","value":60},
+     "boundaryPoints":[{"offset":{"direction":0,"magnitude":300}},{"offset":{"direction":0,"magnitude":330}}]}},
+   {"type":"PlanRestrictionZone","zone":{"type":"Zone","shape":"polygon",
+     "minAltitude":{"system":"atl","value":10},
+     "boundaryPoints":[{"offset":{"direction":3,"magnitude":200}},{"offset":{"direction":3.3,"magnitude":200}},{"offset":{"direction":3.15,"magnitude":260}}]}}
+ ]
+}
+        
+`;
+
+test("Dronelink: se descomprime el archivo", () => {
+  const json = decodeDronelink(DRONELINK_FIXTURE);
+  assert.equal(json.length, 7592);
+  assert.equal(JSON.parse(json).type, "PlanComponent");
+});
+
+test("Dronelink: el mapa y la órbita de un plan real", () => {
+  const result = importDronelink(DRONELINK_FIXTURE);
+  const plan = result.plan;
+  assert.equal(result.name, "Ejemplo Dronelink");
+  assert.equal(plan.name, "Ejemplo Dronelink");
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(plan.takeoff, [18.2, -65.9]);
+  assert.equal(plan.finishAction, "GO_HOME");
+  assert.equal(plan.transitSpeed, 4.47);
+  assert.equal(plan.components.length, 2);
+
+  const [map, orbit] = plan.components;
+  assert.equal(map.type, "map");
+  assert.deepEqual(map.boundary, [
+    [18.2000887, -65.9001574],
+    [18.2001587, -65.8999306],
+    [18.1998297, -65.8998167],
+    [18.1997535, -65.9000435],
+  ]);
+  assert.equal(map.altitude, 10);
+  assert.equal(map.terrainFollow, false);
+  assert.equal(map.frontOverlap, 75);
+  assert.equal(map.sideOverlap, 70);
+  assert.equal(map.direction, 71.9);
+  assert.equal(map.pattern, "grid");
+  assert.deepEqual(map.start, [18.2000159, -65.9001378]);
+  assert.equal(map.gimbalPitch, -90);
+  assert.equal(map.maxSpeed, 8.94);
+  assert.equal(map.minPhotoInterval, 5);
+  assert.equal(map.photoSize, "48mp");
+  assert.equal(map.capturePriority, "distance");
+  assert.equal(map.heading, "forward");
+  assert.equal(map.spacing, "overlap");
+
+  assert.equal(orbit.type, "orbit");
+  assert.deepEqual(orbit.center, [18.1999489, -65.8999953]);
+  assert.equal(orbit.radius, 25.9);
+  assert.equal(orbit.startBearing, 288.7);
+  assert.equal(orbit.altitude, 20);
+  assert.equal(orbit.clockwise, true);
+  assert.equal(orbit.rotations, 1);
+  assert.equal(orbit.speed, 2.78);
+  assert.equal(orbit.heading, "center");
+  // Sin ángulo del gimbal, Dronelink apunta la cámara al centro en el suelo.
+  assert.equal(orbit.poiAltitude, 0);
+  assert.equal(orbit.captureMode, "photo");
+
+  // Se guarda y se vuelve a leer igual.
+  assert.deepEqual(normalizePlan(JSON.parse(serializePlan(plan))), normalizePlan(plan));
+});
+
+test("Dronelink: waypoints, foto, panorámica, corredor, espiral y zonas", () => {
+  const result = importDronelink(DRONELINK_OTHERS);
+  const plan = result.plan;
+  assert.deepEqual(result.skipped, ["Facade", "Command", "Command"]);
+  assert.deepEqual(plan.takeoff, [18.1999102, -65.9]);
+  assert.equal(plan.finishAction, "LAND");
+  assert.equal(plan.transitSpeed, 15);
+  assert.equal(plan.components.length, 7);
+  const [path, photo, pano, corridor, orbit, antenna, zone] = plan.components;
+
+  assert.equal(path.type, "waypoints");
+  assert.equal(path.name, "Ruta");
+  assert.equal(path.terrainFollow, true);
+  assert.equal(path.speed, 3);
+  assert.equal(path.captureMode, "video");
+  assert.deepEqual(
+    path.points.map((p) => [p.position, p.altitude, p.heading, p.gimbalPitch]),
+    [
+      [[18.2008983, -65.9], 50, 90, -30],
+      [[18.2, -65.8990544], 50, null, null],
+      [[18.1995508, -65.9], 80, null, null],
+    ],
+  );
+
+  assert.equal(photo.type, "photo");
+  assert.deepEqual(photo.position, [18.21, -65.9101891]);
+  assert.equal(photo.altitude, 25);
+  assert.equal(photo.heading, 315);
+  assert.equal(photo.gimbalPitch, -45);
+  assert.equal(photo.photoType, "aeb3");
+
+  assert.equal(pano.type, "pano");
+  assert.deepEqual(pano.position, [18.2001906, -65.8997994]);
+  assert.equal(pano.altitude, 60);
+  assert.equal(pano.panoType, "sphere");
+  assert.equal(pano.heading, 180);
+
+  assert.equal(corridor.type, "corridor");
+  assert.deepEqual(corridor.path, [
+    [18.2017966, -65.9],
+    [18.2031534, -65.8981865],
+  ]);
+  assert.equal(corridor.width, 86.1);
+  assert.equal(CorridorPlanner.passCount(corridor.width, CorridorPlanner.spacing(corridor).line), 3);
+  assert.equal(corridor.frontOverlap, 80);
+  assert.equal(corridor.sideOverlap, 60);
+  assert.equal(corridor.maxSpeed, 15);
+
+  assert.equal(orbit.type, "orbit");
+  assert.deepEqual(orbit.center, [18.1999999, -65.8952719]);
+  assert.equal(orbit.radius, 30);
+  assert.equal(orbit.startBearing, 90);
+  assert.equal(orbit.clockwise, false);
+  assert.equal(orbit.rotations, 1.5);
+  assert.equal(orbit.finalAltitude, 45);
+  assert.equal(orbit.finalRadius, 40);
+  assert.equal(orbit.heading, "custom");
+  assert.equal(orbit.headingAngle, 28.6);
+  assert.equal(orbit.poiAltitude, null);
+  assert.equal(orbit.gimbalPitch, -11.5);
+  assert.equal(orbit.captureMode, "none");
+
+  assert.equal(antenna.type, "zone");
+  assert.equal(antenna.name, "Antena");
+  assert.equal(antenna.shape, "circle");
+  assert.deepEqual(antenna.boundary, [
+    [18.2026949, -65.9],
+    [18.2029644, -65.9],
+  ]);
+  assert.equal(antenna.minAltitude, null);
+  assert.equal(antenna.maxAltitude, 60);
+
+  assert.equal(zone.shape, "polygon");
+  assert.equal(zone.boundary.length, 3);
+  assert.equal(zone.minAltitude, 10);
+  assert.equal(zone.maxAltitude, 30.48);
+
+  assert.deepEqual(normalizePlan(JSON.parse(serializePlan(plan))), normalizePlan(plan));
+});
+
+test("Dronelink: los demás archivos no son de Dronelink", () => {
+  assert.equal(importDronelink("<kml><Document><name>Finca</name></Document></kml>"), null);
+  assert.equal(importDronelink(""), null);
+  assert.equal(importDronelink('{"version":2,"components":[]}'), null);
+  assert.equal(importDronelink("hola"), null);
+  assert.ok(importDronelink(DRONELINK_OTHERS));
 });
