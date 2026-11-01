@@ -3387,6 +3387,434 @@ export function importKml(text) {
   return { name, plan: null, components: components.slice(0, KML_MAX_COMPONENTS) };
 }
 
+// ---- Dronelink (.dronelink) ----
+
+/** El radio de la Tierra que usa Dronelink para pasar de desplazamientos a coordenadas. */
+const DRONELINK_EARTH_RADIUS = 6378137;
+/** La altura máxima de una zona de Dronelink si no trae una (100 pies). */
+const DRONELINK_ZONE_MAX_ALTITUDE = 30.48;
+// Las mismas constantes que Math.toRadians y Math.toDegrees de Java, para dar los mismos números que la app.
+const dlRad = (d) => d * 0.017453292519943295;
+const dlDeg = (r) => r * 57.29577951308232;
+const roundTo = (x, decimals) => {
+  const k = 10 ** decimals;
+  return Math.round(x * k) / k;
+};
+/** Un rumbo en grados, de 0 a 360, con un decimal. */
+const dlBearingDegrees = (radians) => roundTo(Geo.normalize(dlDeg(radians)), 1) % 360;
+
+/** Las letras de 15 bits otra vez como bytes ("StorageBinaryString" de lzutf8). */
+function dlBinaryString(input) {
+  const text = input.replace(/耂/g, "\0");
+  const output = new Uint8Array(text.length * 2 + 2);
+  let position = 0;
+  let remainder = 0;
+  let state = 0;
+  for (let i = 0; i < text.length; i++) {
+    const value = text.charCodeAt(i);
+    if (value >= 32768) {
+      // La marca final: 32769 = el último byte era de relleno.
+      if (value === 32769) position--;
+      state = 0;
+      continue;
+    }
+    if (state === 0) {
+      remainder = value;
+    } else {
+      const pair = (remainder << state) | (value >>> (15 - state));
+      output[position++] = pair >>> 8;
+      output[position++] = pair & 255;
+      remainder = value & ((1 << (15 - state)) - 1);
+    }
+    state = state === 15 ? 0 : state + 1;
+  }
+  return position <= 0 ? null : output.subarray(0, position);
+}
+
+/**
+ * LZ-UTF8: los bytes de UTF-8 van tal cual, y "110lllll dddddddd" o "111lllll dddddddd dddddddd"
+ * copian l bytes de d bytes atrás. null si el archivo está dañado.
+ */
+function dlLzUtf8(input) {
+  let output = new Uint8Array(Math.max(1024, input.length * 4));
+  let size = 0;
+  const put = (value) => {
+    if (size === output.length) {
+      const bigger = new Uint8Array(size * 2);
+      bigger.set(output);
+      output = bigger;
+    }
+    output[size++] = value;
+  };
+  let i = 0;
+  while (i < input.length) {
+    const value = input[i];
+    if (value >>> 6 !== 3) {
+      put(input[i++]);
+      continue;
+    }
+    const sequence = value >>> 5;
+    // Un puntero cortado al final no trae nada útil.
+    if (i === input.length - 1 || (i === input.length - 2 && sequence === 7)) break;
+    const second = input[i + 1];
+    if (second >>> 7 === 1) {
+      // El primer byte de una letra de varios bytes, no un puntero.
+      put(input[i++]);
+      continue;
+    }
+    const length = value & 31;
+    const distance = sequence === 6 ? second : (second << 8) | input[i + 2];
+    i += sequence === 6 ? 2 : 3;
+    const from = size - distance;
+    if (distance <= 0 || from < 0) return null;
+    for (let k = 0; k < length; k++) put(output[from + k]);
+  }
+  return output.subarray(0, size);
+}
+
+/** El JSON de un archivo .dronelink: tal cual si no viene comprimido, o descomprimido. null si no es de Dronelink. */
+export function decodeDronelink(text) {
+  const trimmed = text.replace(/^[﻿ \t\r\n]+/, "");
+  if (trimmed.startsWith("{")) return trimmed;
+  if (!trimmed || trimmed.startsWith("<")) return null;
+  const bytes = dlBinaryString(trimmed);
+  const raw = bytes ? dlLzUtf8(bytes) : null;
+  if (!raw) return null;
+  const json = new TextDecoder().decode(raw);
+  return json.startsWith("{") ? json : null;
+}
+
+/** El punto a `meters` de `from` con rumbo `bearing` (radianes), como lo calcula Dronelink. */
+export function dronelinkDestination(from, bearing, meters) {
+  const delta = meters / DRONELINK_EARTH_RADIUS;
+  const phi1 = dlRad(from[0]);
+  const lambda1 = dlRad(from[1]);
+  const phi2 = Math.asin(Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(bearing));
+  let lambda2 = lambda1 + Math.atan2(Math.sin(bearing) * Math.sin(delta) * Math.cos(phi1), Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2));
+  if (lambda2 < -Math.PI || lambda2 > Math.PI) lambda2 = ((lambda2 + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
+  return [round7(dlDeg(phi2)), round7(dlDeg(lambda2))];
+}
+
+/** Distancia en metros, con el mismo radio de la Tierra que Dronelink. */
+function dronelinkDistance(a, b) {
+  const dLat = dlRad(b[0] - a[0]);
+  const dLon = dlRad(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(dlRad(a[0])) * Math.cos(dlRad(b[0])) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return DRONELINK_EARTH_RADIUS * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+/** Rumbo en grados de `a` a `b` sobre la esfera (0 = norte). */
+function dronelinkBearing(a, b) {
+  const phi1 = dlRad(a[0]);
+  const phi2 = dlRad(b[0]);
+  const dLon = dlRad(b[1]) - dlRad(a[1]);
+  const y = Math.sin(dLon) * Math.cos(phi2);
+  const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLon);
+  return (dlDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+const dlObjects = (array) => (Array.isArray(array) ? array.filter((x) => x && typeof x === "object" && !Array.isArray(x)) : []);
+const dlNumber = (json, name) => (json && typeof json[name] === "number" && Number.isFinite(json[name]) ? json[name] : null);
+const dlPath = (json, ...names) => names.reduce((j, name) => (j && typeof j[name] === "object" && j[name] !== null ? j[name] : null), json);
+const dlString = (json, name, fallback = "") => (json && typeof json[name] === "string" ? json[name] : fallback);
+
+/**
+ * Lee un archivo .dronelink (Export → .dronelink en Dronelink), igual que DronelinkImport en
+ * Kotlin. Devuelve {name, plan, components: [], skipped} o null si no es un plan de Dronelink. Trae
+ * el plan entero: nombre, despegue, velocidad de tránsito, qué hacer al final y sus componentes en
+ * orden. Se convierten:
+ * - Map → mapa (el patrón Linear → corredor);
+ * - Orbit → órbita (el radio y el punto de inicio salen de su "Orbit Start");
+ * - Waypoints → waypoints, con la altura, el rumbo y el gimbal de cada punto;
+ * - Photo → foto y Pano → panorámica;
+ * - las zonas restringidas del plan → zonas.
+ * Lo demás (Facade, Inspection, Commands…) no se importa y va en `skipped`.
+ *
+ * El archivo es el plan en JSON comprimido con LZ-UTF8 y guardado como texto, 15 bits por letra (el
+ * "StorageBinaryString" de la librería lzutf8 que usa Dronelink). En el JSON las posiciones van como
+ * desplazamientos (rumbo en radianes desde el norte y metros) desde el punto del plan, los ángulos
+ * en radianes y las velocidades en m/s.
+ */
+export function importDronelink(text) {
+  const json = decodeDronelink(text);
+  if (!json) return null;
+  let plan;
+  try {
+    plan = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!plan || plan.type !== "PlanComponent") return null;
+
+  const coordinate = (c) => {
+    const lat = dlNumber(c, "latitude");
+    const lon = dlNumber(c, "longitude");
+    if (lat === null || lon === null || (Math.abs(lat) < 1e-6 && Math.abs(lon) < 1e-6)) return null;
+    return [round7(lat), round7(lon)];
+  };
+  const origin = coordinate(plan.coordinate);
+  if (!origin) return null;
+
+  /** Un desplazamiento: [rumbo en radianes, metros]. */
+  const vector = (v) => {
+    if (!v || typeof v !== "object" || (!("direction" in v) && !("magnitude" in v))) return null;
+    return [dlNumber(v, "direction") ?? 0, dlNumber(v, "magnitude") ?? 0];
+  };
+  const point = (reference, [direction, magnitude]) => dronelinkDestination(reference, direction, magnitude);
+  // La altura del suelo sobre el mar en el despegue, para las alturas "msl".
+  const elevation = dlObjects(plan.elevations).at(-1)?.altitude;
+  const ground = elevation?.system === "msl" ? dlNumber(elevation, "value") : null;
+  const speedOf = (j) => {
+    const max = dlNumber(dlPath(j, "droneMotionLimits", "position", "x", "velocity"), "max");
+    return max !== null && max > 0 ? max : null;
+  };
+  const planSpeed = speedOf(plan);
+  const skipped = [];
+
+  /** El punto desde donde se miden los desplazamientos de un componente. */
+  const referenceOf = (j, parent) => {
+    const reference = dlPath(j, "reference");
+    if (!reference) return parent;
+    if (reference.source === "input") return coordinate(dlPath(reference, "input", "coordinate")) ?? parent;
+    return origin;
+  };
+  /** Una altura de Dronelink: sobre el despegue (atl), sobre el suelo (agl) o sobre el mar (msl). */
+  const height = (h) => {
+    const value = dlNumber(h, "value");
+    if (value === null) return null;
+    const system = dlString(h, "system", "atl");
+    if (system === "agl") return { meters: roundTo(value, 1), aboveGround: true };
+    if (system === "msl") return { meters: roundTo(value - (ground ?? 0), 1), aboveGround: false };
+    return { meters: roundTo(value, 1), aboveGround: false };
+  };
+  const componentSpeed = (j, fallback) => roundTo(Math.min(15, Math.max(1, speedOf(j) ?? planSpeed ?? fallback)), 2);
+  /** El ángulo del gimbal (grados) del canal 0. */
+  const gimbalPitch = (g) => {
+    const x = dlNumber(dlPath(g, "0"), "x");
+    return x === null ? null : roundTo(dlDeg(x), 1);
+  };
+  const nameOf = (j) => dlString(dlPath(j, "descriptors"), "name").trim() || null;
+  const captureModeOf = (j) => {
+    const type = dlObjects(j.cameraCaptureConfigurations)[0]?.captureType;
+    return type === "photos" ? "photo" : type === "video" ? "video" : "none";
+  };
+  const photoTypeOf = (j) => (j.cameraPhotoMode === "aeb" ? "aeb3" : "single");
+
+  function map(j, reference, start, altitude) {
+    const boundary = dlObjects(j.boundaryPoints).map((b) => vector(b.offset)).filter(Boolean).map((v) => point(reference, v));
+    const imageWidth = dlNumber(dlPath(j, "cameraSpecification", "image"), "width") ?? 8064;
+    const photoSize = imageWidth < 6000 ? "12mp" : "48mp";
+    const frontOverlap = roundTo((dlNumber(j, "frontOverlap") ?? 0.75) * 100, 1);
+    const sideOverlap = roundTo((dlNumber(j, "sideOverlap") ?? 0.7) * 100, 1);
+    const gimbal = gimbalPitch(j.gimbalOrientations) ?? -90;
+    const cameraMode = dlString(j, "cameraMode", "photo");
+    const captureMode = cameraMode === "photo" ? "photo" : cameraMode === "video" ? "video" : "none";
+    const speed = componentSpeed(j, 8);
+    if (j.pattern === "linear") {
+      if (boundary.length < 2) return null;
+      const corridor = {
+        ...newCorridorComponent(boundary),
+        name: nameOf(j),
+        altitude: altitude?.meters ?? 30,
+        terrainFollow: altitude?.aboveGround ?? false,
+        frontOverlap,
+        sideOverlap,
+        gimbalPitch: gimbal,
+        maxSpeed: speed,
+        minPhotoInterval: dlNumber(j, "minCaptureInterval") ?? 5,
+        captureMode,
+        photoSize,
+        photoType: photoTypeOf(j),
+      };
+      // Por número de pasadas: el ancho justo para ese número de pasadas con este traslape
+      // (redondeado hacia abajo, para que no salga una pasada de más).
+      const passes = dlNumber(j, "mapPatternLinearPassCount");
+      corridor.width =
+        j.mapPatternLinearStrategy === "passCount" && passes !== null
+          ? Math.floor(passes * CorridorPlanner.spacing(corridor).line * 10) / 10
+          : roundTo(dlNumber(j, "mapPatternLinearCorridorWidth") ?? 40, 1);
+      return corridor;
+    }
+    if (boundary.length < 3) return null;
+    const strategy = dlString(j, "droneOrientationStrategy", "forward");
+    const orientation = dlPath(j, "droneOrientation");
+    const z = dlNumber(orientation, "z");
+    const preferred = vector(j.preferredStartOffset);
+    const captureSpeed = dlNumber(dlPath(j, "captureDroneMotionLimits", "position", "x", "velocity"), "max");
+    return {
+      ...newMapComponent(boundary),
+      name: nameOf(j),
+      altitude: altitude?.meters ?? 30,
+      terrainFollow: altitude?.aboveGround ?? false,
+      frontOverlap,
+      sideOverlap,
+      direction: dlBearingDegrees(dlNumber(j, "direction") ?? 0),
+      pattern: j.pattern === "grid" ? "grid" : "normal",
+      start: preferred ? point(reference, preferred) : start,
+      gimbalPitch: gimbal,
+      maxSpeed: speed,
+      minPhotoInterval: dlNumber(j, "minCaptureInterval") ?? 5,
+      captureMode,
+      photoSize,
+      capturePriority: j.capturePriority === "time" ? "time" : "distance",
+      photoType: photoTypeOf(j),
+      captureSpeed: captureSpeed === null ? null : roundTo(captureSpeed, 2),
+      spacing: j.spacing === "distance" ? "distance" : "overlap",
+      frontDistance: roundTo(dlNumber(j, "frontDistance") ?? 10, 1),
+      sideDistance: roundTo(dlNumber(j, "sideDistance") ?? 10, 1),
+      heading: MAP_HEADINGS.some(([key]) => key === strategy) ? strategy : "forward",
+      headingAngle: z === null ? 0 : dlBearingDegrees(z),
+      headingReference: orientation?.zReference === "path" ? "path" : "north",
+      verifyFileCreated: j.captureVerifyFileCreated === true,
+    };
+  }
+
+  function orbit(j, reference, start, altitude) {
+    const centerOffset = vector(j.centerOffset);
+    const center = centerOffset ? point(reference, centerOffset) : reference;
+    const orientation = dlPath(j, "droneOrientation");
+    const z = dlNumber(orientation, "z");
+    // Sin rumbo propio, Dronelink mira al centro; con rumbo respecto a la ruta, adelante o atrás.
+    let heading = "center";
+    if (orientation && z !== null) {
+      if (orientation.zReference === "north") heading = "custom";
+      else if (orientation.zReference === "path" && Math.abs(angleDifference(0, dlDeg(z))) < 45) heading = "forward";
+      else if (orientation.zReference === "path" && Math.abs(angleDifference(180, dlDeg(z))) < 45) heading = "backward";
+    }
+    // Sin ángulo del gimbal, Dronelink apunta la cámara al centro, en el suelo.
+    const gimbal = gimbalPitch(j.gimbalOrientations);
+    const radius = start ? dronelinkDistance(center, start) : 30;
+    const finalRadius = dlNumber(j, "finalRadius");
+    return {
+      ...newOrbitComponent(center),
+      name: nameOf(j),
+      radius: roundTo(Math.max(1, radius), 1),
+      altitude: altitude?.meters ?? 20,
+      finalAltitude: height(j.finalAltitude)?.meters ?? null,
+      finalRadius: finalRadius === null ? null : roundTo(finalRadius, 1),
+      clockwise: j.direction !== "counterclockwise",
+      rotations: roundTo((dlNumber(j, "circumference") ?? 2 * Math.PI) / (2 * Math.PI), 2),
+      startBearing: start ? roundTo(dronelinkBearing(center, start), 1) % 360 : null,
+      speed: componentSpeed(j, 4),
+      heading,
+      headingAngle: heading === "custom" ? dlBearingDegrees(z) : 0,
+      poiAltitude: gimbal === null && heading === "center" ? 0 : null,
+      gimbalPitch: gimbal ?? -20,
+      captureMode: captureModeOf(j),
+    };
+  }
+
+  function path(j, reference, altitude) {
+    let current = altitude?.meters ?? 30;
+    const points = [];
+    for (const waypoint of dlObjects(j.waypoints)) {
+      const offset = vector(waypoint.offset);
+      if (!offset) continue;
+      const marker = dlPath(waypoint, "marker");
+      const own = height(dlPath(marker, "altitude"));
+      if (own) current = own.meters;
+      const orientation = dlPath(marker, "droneOrientation");
+      const z = dlString(orientation, "zReference", "north") === "north" ? dlNumber(orientation, "z") : null;
+      points.push({ ...newWaypoint(point(reference, offset), current), heading: z === null ? null : dlBearingDegrees(z), gimbalPitch: gimbalPitch(dlPath(marker, "gimbalOrientations")) });
+    }
+    if (!points.length) return null;
+    return {
+      ...newWaypointsComponent(points),
+      name: nameOf(j),
+      altitude: altitude?.meters ?? 30,
+      terrainFollow: altitude?.aboveGround ?? false,
+      speed: componentSpeed(j, 5),
+      captureMode: captureModeOf(j),
+    };
+  }
+
+  function photo(j, start, altitude) {
+    if (!start) return null;
+    return {
+      ...newPhotoComponent(start),
+      name: nameOf(j),
+      altitude: altitude?.meters ?? 30,
+      terrainFollow: altitude?.aboveGround ?? false,
+      heading: dlBearingDegrees(dlNumber(j, "heading") ?? 0),
+      gimbalPitch: gimbalPitch(j.gimbalOrientations) ?? -30,
+      photoType: photoTypeOf(j),
+    };
+  }
+
+  /** Las panorámicas de Dronelink son esféricas u horizontales (360°): las dos salen como Esfera. */
+  function pano(j, start, altitude) {
+    if (!start) return null;
+    return {
+      ...newPanoComponent(start),
+      name: nameOf(j),
+      altitude: altitude?.meters ?? 40,
+      terrainFollow: altitude?.aboveGround ?? false,
+      panoType: "sphere",
+      heading: dlBearingDegrees(dlNumber(j, "heading") ?? 0),
+    };
+  }
+
+  /** Los componentes de un componente de Dronelink (una lista se abre en los suyos). */
+  function component(j, parent) {
+    const reference = referenceOf(j, parent);
+    const approach = dlPath(j, "approachComponent");
+    const startOffset = vector(dlPath(approach, "destinationOffset"));
+    const start = startOffset ? point(reference, startOffset) : null;
+    const altitude = height(dlPath(approach, "altitudeRange", "altitude"));
+    const type = dlString(j, "type");
+    switch (type) {
+      case "ListComponent":
+        return dlObjects(j.childComponents).flatMap((child) => component(child, reference));
+      case "MapComponent":
+        return [map(j, reference, start, altitude)].filter(Boolean);
+      case "OrbitComponent":
+        return [orbit(j, reference, start, altitude)].filter(Boolean);
+      case "PathComponent":
+        return [path(j, reference, altitude)].filter(Boolean);
+      case "PhotoComponent":
+        return [photo(j, start, altitude)].filter(Boolean);
+      case "PanoComponent":
+        return [pano(j, start, altitude)].filter(Boolean);
+      default:
+        skipped.push(type.replace(/Component$/, "") || "?");
+        return [];
+    }
+  }
+
+  function zone(restriction) {
+    const z = dlPath(restriction, "zone");
+    if (!z) return null;
+    const reference = referenceOf(z, origin);
+    const boundary = dlObjects(z.boundaryPoints).map((b) => vector(b.offset)).filter(Boolean).map((v) => point(reference, v));
+    const circle = dlString(z, "shape", "circle") === "circle";
+    if ((circle && boundary.length < 2) || (!circle && boundary.length < 3)) return null;
+    const min = height(z.minAltitude)?.meters ?? null;
+    return {
+      // Redonda: el primer punto es el centro y el segundo marca el radio.
+      ...newZoneComponent(circle ? "circle" : "polygon", circle ? boundary.slice(0, 2) : boundary),
+      name: nameOf(restriction),
+      minAltitude: min !== null && min > 0 ? min : null,
+      maxAltitude: height(z.maxAltitude)?.meters ?? DRONELINK_ZONE_MAX_ALTITUDE,
+    };
+  }
+
+  const name = dlString(dlPath(plan, "descriptors"), "name").trim() || null;
+  const components = [];
+  const root = dlPath(plan, "rootComponent");
+  if (root) components.push(...component(root, origin));
+  for (const restriction of dlObjects(plan.restrictionZones)) {
+    const z = zone(restriction);
+    if (z) components.push(z);
+  }
+  const takeoffOffset = vector(plan.takeoffOffset);
+  const result = newPlan(name ?? "Misión de Dronelink", components);
+  result.takeoff = takeoffOffset ? point(origin, takeoffOffset) : origin;
+  const complete = dlString(plan, "completeAction", "returnHome");
+  result.finishAction = complete === "none" ? "HOVER" : complete === "autoLand" ? "LAND" : "GO_HOME";
+  result.transitSpeed = planSpeed === null ? 8 : roundTo(Math.min(15, Math.max(1, planSpeed)), 2);
+  return { name, plan: result, components: [], skipped };
+}
+
 const xmlEscape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 /** CDATA que aguanta cualquier texto (un "]]>" adentro se parte en dos). */
 const cdata = (text) => `<![CDATA[${String(text).replaceAll("]]>", "]]]]><![CDATA[>")}]]>`;

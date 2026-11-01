@@ -73,6 +73,7 @@ import {
   normalizePlan,
   num,
   importKml as readKmlText,
+  importDronelink,
   FlightPreview,
   MissionParts,
   exportKml,
@@ -87,9 +88,9 @@ import {
   waypointHeading,
   zoneHeights,
   TerrainFollow,
-} from "./planner.js?v=20261030d";
-import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261030d";
-import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261030d";
+} from "./planner.js?v=20261101a";
+import { GitHubSync, TOKEN_HELP_URL, syncAll } from "./sync.js?v=20261101a";
+import { ensureTerrain, terrain, terrainLoading } from "./terrain.js?v=20261101a";
 
 const $ = (id) => document.getElementById(id);
 const STATE_KEY = "mini4pro.state.v1";
@@ -2010,7 +2011,7 @@ function buildPlanBody(body) {
       ["inspection", "Inspección", "Alrededor de una torre, un tanque o un edificio", () => addComponent(newFacadeComponent("polygon"))],
       ["commands", "Comandos", "Esperar, fotos, video, gimbal, girar o cambiar de altura, en orden", () => addComponent(newCommandsComponent())],
       ["zone", "Zona restringida", "Por donde el dron no debe pasar: los caminos la rodean", () => addComponent(newZoneComponent())],
-      ["upload", "Desde un KML o KMZ", "Áreas, líneas o puntos de Google Earth, Dronelink o DJI", () => importKml("component")],
+      ["upload", "Desde un archivo", "KML o KMZ de Google Earth, Dronelink o DJI, o un plan .dronelink", () => importKml("component")],
     ]);
   });
   body.append(add);
@@ -3658,7 +3659,8 @@ $("kml-file").addEventListener("change", async (event) => {
   if (!file) return;
   try {
     const text = await readKml(file);
-    const result = text ? readKmlText(text) : null;
+    // Un .dronelink trae el plan entero de Dronelink; si no, es un KML.
+    const result = text ? importDronelink(text) ?? readKmlText(text) : null;
     const imported = result?.plan?.components ?? result?.components ?? [];
     if (!imported.length) {
       toast("Ese archivo no tiene áreas, líneas ni puntos que se puedan usar", true);
@@ -3670,14 +3672,16 @@ $("kml-file").addEventListener("change", async (event) => {
       const added = imported.map((c) => (ids.has(c.id) ? { ...c, id: newMapComponent().id } : c));
       changePlan(() => current.components.push(...added), added.length === 1 ? added[0].id : null);
     } else {
-      const plan = result.plan ? { ...result.plan, id: newPlan().id, updatedAt: Date.now() } : newPlan(result.name || file.name.replace(/\.km[lz]$/i, ""), imported);
+      const plan = result.plan ? { ...result.plan, id: newPlan().id, updatedAt: Date.now() } : newPlan(result.name || file.name.replace(/\.(km[lz]|dronelink)$/i, ""), imported);
       state.missions[plan.id] = plan;
       state.dirty[plan.id] = true;
       persist();
       scheduleSync();
       openPlan(plan.id, null, plan.components.length === 1 ? plan.components[0].id : null);
     }
-    toast(result.plan ? `Misión importada: ${imported.length} ${imported.length === 1 ? "componente" : "componentes"}` : `Importado: ${importedText(imported)}`);
+    const message = result.plan ? `Misión importada: ${imported.length} ${imported.length === 1 ? "componente" : "componentes"}` : `Importado: ${importedText(imported)}`;
+    const skipped = skippedText(result.skipped ?? []);
+    toast(skipped ? `${message}. ${skipped}` : message);
   } catch (error) {
     toast(`No se pudo leer el archivo: ${error.message}`, true);
   }
@@ -3695,6 +3699,18 @@ function importedText(components) {
   add(count("zone"), "zona restringida", "zonas restringidas");
   for (const c of components.filter((c) => c.type === "waypoints")) parts.push(`un recorrido de ${c.points.length} puntos`);
   return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}` : parts[0];
+}
+
+/**
+ * "No se importó: Facade y 2 Commands" con los componentes de Dronelink que el planificador no
+ * tiene; null si no faltó ninguno. Igual que MissionFormat.skipped en la app.
+ */
+function skippedText(types) {
+  if (!types.length) return null;
+  const counts = new Map();
+  for (const type of types) counts.set(type, (counts.get(type) ?? 0) + 1);
+  const parts = [...counts].map(([type, n]) => (n === 1 ? type : `${n} ${type}`));
+  return `No se importó: ${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}` : parts[0]}`;
 }
 
 /** JSZip se carga solo cuando hace falta (para leer o crear un KMZ). */
