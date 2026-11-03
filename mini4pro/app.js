@@ -2100,7 +2100,9 @@ function renderEstimate(el) {
     const name = `${item.number}. ${componentName(item.component)}`;
     if (item.approach) {
       const around = item.approach.via.length ? " (rodea una zona)" : "";
-      row(`${item.approach.kind === "takeoff" ? "Despegue " : ""}→ ${name}${around}`, item.approach.durationSeconds, item.approach.lengthMeters, "transit");
+      // El despegue de DJI va en la misma fila que la subida y el tránsito hasta el primer componente.
+      const takeoff = item.approach.kind === "takeoff";
+      row(`${takeoff ? "Despegue " : ""}→ ${name}${around}`, item.approach.durationSeconds + (takeoff ? planResult.takeoffSeconds : 0), item.approach.lengthMeters, "transit");
     }
     row(name, item.result.durationSeconds, item.result.lengthMeters);
   }
