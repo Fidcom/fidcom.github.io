@@ -191,7 +191,7 @@ const photosFixture = {
 test("dónde se toma cada foto: los mismos puntos y tiempos que en el teléfono", () => {
   const plan = normalizePlan(structuredClone(photosFixture));
   const result = PlanPlanner.plan(plan);
-  near(result.durationSeconds, 2124.985782, 1e-5);
+  near(result.durationSeconds, 2128.585782, 1e-5);
   assert.equal(result.photoCount, 428);
   // [duración, fotos, puntos, primero, último, metros hasta el último]: lo que da PhotoPointsTest.kt.
   const expected = [
@@ -224,14 +224,14 @@ test("dónde se toma cada foto: los mismos puntos y tiempos que en el teléfono"
   near(byTime.photoSpacing / byTime.speed, 2, 1e-9);
 
   const timeline = FlightPreview.timeline(plan);
-  near(timeline.duration, 2124.985782, 1e-5);
+  near(timeline.duration, 2128.585782, 1e-5);
   assert.equal(timeline.shots.length, 428);
-  near(timeline.shots[10].time, 71.069385, 1e-5);
+  near(timeline.shots[10].time, 74.669385, 1e-5);
   near(timeline.shots[10].position[0], 18.18009689, 1e-8);
   near(timeline.shots[10].position[1], -65.8199833, 1e-8);
-  near(timeline.shots[60].time, 328.775808, 1e-5);
-  assert.equal(FlightPreview.photosBy(timeline, 71.0694), 11);
-  assert.equal(FlightPreview.photosBy(timeline, 71.0693), 10);
+  near(timeline.shots[60].time, 332.375808, 1e-5);
+  assert.equal(FlightPreview.photosBy(timeline, 74.6694), 11);
+  assert.equal(FlightPreview.photosBy(timeline, 74.6693), 10);
 });
 
 test("el patrón cruzado agrega una pasada perpendicular que empieza cerca", () => {
@@ -363,9 +363,9 @@ test("fotos en los cruces: los mismos puntos y tiempos que en el teléfono", () 
   near(points.at(-1).position[1], -65.81998904, 1e-8);
   near(points.at(-1).along, 1628.820527, 1e-5);
   const timeline = FlightPreview.timeline(plan);
-  near(timeline.duration, 1045.199610, 1e-5);
+  near(timeline.duration, 1048.799610, 1e-5);
   assert.equal(timeline.shots.length, 355);
-  near(timeline.shots[20].time, 85.382784, 1e-5);
+  near(timeline.shots[20].time, 88.982784, 1e-5);
 });
 
 test("el patrón oblicuo agrega cuatro pasadas inclinadas, corridas hacia atrás", () => {
@@ -591,7 +591,8 @@ test("los componentes se encadenan: la órbita empieza donde está más cerca de
   assert.deepEqual(result.transits[1].from, mapEnd);
   assert.deepEqual(result.transits[1].to, orbit.result.start);
   const parts = map.result.durationSeconds + orbit.result.durationSeconds + result.transits.reduce((s, t) => s + t.durationSeconds, 0);
-  near(result.durationSeconds, parts, 0.001);
+  // Más el despegue y el aterrizaje de DJI.
+  near(result.durationSeconds, parts + result.takeoffSeconds + result.landingSeconds, 0.001);
 });
 
 test("el despegue automático va al sur del primer componente y el mapa empieza en la esquina más cercana", () => {
@@ -609,11 +610,33 @@ test("el despegue automático va al sur del primer componente y el mapa empieza 
   assert.ok(Geo.distance(ne, pr.toGeo({ x: 100, y: 100 })) < 15, `empieza a ${Geo.distance(ne, pr.toGeo({ x: 100, y: 100 }))} m de la esquina`);
 });
 
+// La misión "Efrain" como se voló el 2026-11-03 (batería estándar), con el registro de vuelo del teléfono.
+const EFRAIN =
+  '{"version":2,"id":"422c3a11","name":"Efrain","finishAction":"GO_HOME","takeoff":[18.1831286,-65.8274395],"transitSpeed":8,' +
+  '"components":[{"id":"c6hqlqq0e","type":"map","altitude":15,"boundary":[[18.1830885,-65.8273651],[18.1830802,-65.8272377],' +
+  '[18.183121,-65.8272383],[18.1831248,-65.8274261]],"frontOverlap":70,"sideOverlap":74,"direction":91,"start":[18.1831118,-65.8274166],' +
+  '"gimbalPitch":-90,"maxSpeed":8,"minPhotoInterval":5,"photoSize":"48mp","heading":"right","headingReference":"north"}]}';
+
+test("el tiempo estimado se parece al vuelo real de la misión Efrain (2026-11-03)", () => {
+  const result = PlanPlanner.plan(normalizePlan(JSON.parse(EFRAIN)));
+  const [map] = result.items;
+  // Lo que vuela el piloto automático (subir, ir al mapa y el mapa): 30.1 s en el registro.
+  near(map.approach.durationSeconds + map.result.durationSeconds, 30.1, 30.1 * 0.06);
+  // El regreso de DJI (soltar, girar, volver subiendo a 20.9 m): 15.0 s; el aterrizaje: 33.9 s.
+  near(result.home.durationSeconds, 15.0, 1.5);
+  near(result.landingSeconds, 33.9, 3.4);
+  // Todo: 123.1 s, de los que 41 s estuvo quieto a 1.2 m antes de empezar la misión.
+  near(result.durationSeconds, 123.1 - 41.1, 82 * 0.06);
+  near(result.durationSeconds, 78.228427, 1e-5);
+  assert.equal(result.photoCount, 4);
+});
+
 test("un componente apagado no se vuela", () => {
   const plan = newPlan("p", [{ ...newMapComponent(square), enabled: false }, newOrbitComponent(pr.toGeo({ x: 300, y: 0 }))]);
   const result = PlanPlanner.plan(plan);
   assert.equal(result.flown, 1);
-  near(result.durationSeconds - result.transits.reduce((s, t) => s + t.durationSeconds, 0), result.items[1].result.durationSeconds, 0.001);
+  const dji = result.takeoffSeconds + result.landingSeconds;
+  near(result.durationSeconds - dji - result.transits.reduce((s, t) => s + t.durationSeconds, 0), result.items[1].result.durationSeconds, 0.001);
   assert.equal(result.photoCount, result.items[1].result.photoCount);
 });
 
@@ -823,14 +846,14 @@ test("waypoints, foto y panorámica dan el mismo tiempo y las mismas fotos que e
   const result = PlanPlanner.plan(plan);
   // Los números que da PlanPlanner.kt con esta misma misión.
   // La foto y la panorámica en 48 MP: 5 s por foto, lo que necesita la cámara.
-  near(result.durationSeconds, 220.6389, 0.01);
+  near(result.durationSeconds, 270.2389, 0.01);
   near(result.lengthMeters, 581.2151, 0.01);
   assert.equal(result.photoCount, 23);
   assert.equal(result.flown, 3);
   const [waypoints, photo, pano, future] = result.items;
   near(waypoints.result.durationSeconds, 60.2735, 0.001);
   assert.equal(waypoints.result.photoCount, 11);
-  near(waypoints.approach.durationSeconds, 21.0945, 0.001);
+  near(waypoints.approach.durationSeconds, 20.6945, 0.001);
   assert.equal(photo.result.photoCount, 3);
   near(pano.result.durationSeconds, 45, 0.001);
   assert.equal(future.result, null);
@@ -944,7 +967,7 @@ test("corredor: las mismas pasadas, tiempo y fotos que en el teléfono", () => {
   // Empieza en el extremo más cerca del despegue.
   near(corridor.path[0][0], 18.1828666, 1e-6);
   near(corridor.path[0][1], -65.8173387, 1e-6);
-  near(result.durationSeconds, 970.706, 0.01);
+  near(result.durationSeconds, 1016.9727, 0.01);
   near(result.lengthMeters, 2305.042, 0.01);
   assert.equal(CorridorPlanner.outline(plan.components[0]).length, 8);
   // Con ancho 0 y video, una sola pasada por la línea.
@@ -1097,7 +1120,7 @@ test("fachada: las mismas paradas, tiempo y fotos que en el teléfono", () => {
   const plan = normalizePlan(structuredClone(facadeFixture));
   const result = PlanPlanner.plan(plan);
   // Los números que da PlanPlanner.kt con esta misma misión.
-  near(result.durationSeconds, 2602.113255, 1e-5);
+  near(result.durationSeconds, 2646.713255, 1e-5);
   near(result.lengthMeters, 3484.38737, 1e-5);
   assert.equal(result.photoCount, 265);
   const [a, b, c] = result.items.map((item) => item.result);
@@ -1233,7 +1256,7 @@ test("zonas: los mismos tránsitos, desvíos y avisos que en el teléfono", () =
   const plan = normalizePlan(structuredClone(zonesFixture));
   const result = PlanPlanner.plan(plan);
   assert.equal(result.flown, 3);
-  near(result.durationSeconds, 239.911833, 1e-5);
+  near(result.durationSeconds, 293.297743, 1e-5);
   near(result.lengthMeters, 975.874268, 1e-5);
   assert.equal(result.photoCount, 3);
   near(result.items[3].result.durationSeconds, 27.833333, 1e-5);
@@ -1242,7 +1265,7 @@ test("zonas: los mismos tránsitos, desvíos y avisos que en el teléfono", () =
     [2, 1, 0, 2],
   );
   [236.519744, 245.946193, 143.255724, 234.529276].forEach((length, i) => near(result.transits[i].lengthMeters, length, 1e-5));
-  near(result.transits[0].durationSeconds, 60.262434, 1e-5);
+  near(result.transits[0].durationSeconds, 59.862434, 1e-5);
   const expected = [
     [18.18021017, -65.81999455],
     [18.18108983, -65.81999455],
@@ -1536,19 +1559,19 @@ const PREVIEW_FIXTURE =
 test("vista previa: igual que FlightPreviewTest.kt (rumbo, giros quietos, velocidad)", () => {
   const plan = normalizePlan(JSON.parse(PREVIEW_FIXTURE));
   const timeline = FlightPreview.timeline(plan);
-  near(timeline.duration, 1527.925, 1e-3);
-  assert.equal(timeline.segments.length, 248);
+  near(timeline.duration, 1579.1916, 1e-3);
+  assert.equal(timeline.segments.length, 253);
   assert.equal(timeline.photoCount, 208);
   const expected = [
-    [0, 0, 18.1797305, -65.8200946, 0, 0, 0, "Hacia 1. Mapa"],
-    [0.1, 28, 18.1804101, -65.8194589, 40, 180, 20, "1. Mapa"],
-    [0.25, 120, 18.1816011, -65.8185462, 30, 295.204, 38, "Hacia 4. Foto"],
-    [0.4, 127, 18.1821604, -65.8190568, 30, 84.291, 75, "6. Corredor"],
-    [0.55, 133, 18.1823313, -65.8197141, 30, 84.291, 115, "6. Corredor"],
-    [0.7, 138, 18.1819964, -65.8202953, 30, 211.916, 156, "Hacia 7. Fachada"],
-    [0.85, 196, 18.1811379, -65.8206619, 15, 90, 184, "7. Fachada"],
-    [0.97, 241, 18.1803593, -65.8201891, 30, 140.195, 206, "8. Comandos"],
-    [1, 247, 18.1797305, -65.8200946, 0, 171.874, 208, "Aterrizando"],
+    [0, 0, 18.1797305, -65.8200946, 0, 0, 0, "Despegando"],
+    [0.1, 30, 18.1803805, -65.8194589, 40, 180, 20, "1. Mapa"],
+    [0.25, 124, 18.181617, -65.8185817, 30, 120, 38, "4. Foto"],
+    [0.4, 131, 18.1822736, -65.8188605, 30, 44.999, 78, "6. Corredor"],
+    [0.55, 136, 18.1823646, -65.819363, 30, 84.291, 120, "6. Corredor"],
+    [0.7, 146, 18.1814373, -65.8206619, 16.664, 90, 158, "7. Fachada"],
+    [0.85, 210, 18.181078, -65.8206619, 25.048, 90, 190, "7. Fachada"],
+    [0.97, 252, 18.1797305, -65.8200946, 46.145, 171.874, 208, "Aterrizando"],
+    [1, 252, 18.1797305, -65.8200946, 0, 171.874, 208, "Aterrizando"],
   ];
   for (const [f, index, lat, lon, altitude, heading, photos, label] of expected) {
     const s = FlightPreview.at(timeline, timeline.duration * f);
@@ -1561,10 +1584,10 @@ test("vista previa: igual que FlightPreviewTest.kt (rumbo, giros quietos, veloci
     assert.equal(s.label, label);
   }
   const stats = (f) => FlightPreview.stats(timeline, FlightPreview.at(timeline, timeline.duration * f));
-  assert.equal(stats(0), "0 m · 0.0 m/s · ↑ 2.8 m/s · 0 de 208 fotos");
+  assert.equal(stats(0), "0 m · 0.0 m/s · ↑ 0.3 m/s · 0 de 208 fotos");
   assert.equal(stats(0.1), "40 m · 2.2 m/s · 20 de 208 fotos");
-  assert.equal(stats(0.7), "30 m · 8.0 m/s · 156 de 208 fotos");
-  assert.equal(stats(1), "0 m · 0.0 m/s · ↓ 3.0 m/s · 208 de 208 fotos");
+  assert.equal(stats(0.7), "17 m · 0.0 m/s · ↑ 1.1 m/s · 158 de 208 fotos");
+  assert.equal(stats(1), "0 m · 0.0 m/s · ↓ 1.0 m/s · 208 de 208 fotos");
 });
 
 test("vista previa: de lado mantiene el rumbo; adelante se detiene a girar en cada línea", () => {

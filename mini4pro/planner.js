@@ -360,6 +360,65 @@ export const MotionTimes = {
 
   /** Subir (o bajar) `meters` m quieto. */
   climb: (meters) => (Math.abs(meters) < 0.4 ? 0 : Math.abs(meters) / MotionTimes.CLIMB_SPEED + MotionTimes.CLIMB_EXTRA),
+
+  // ---- Lo que vuela DJI, no el piloto automático ----
+  // Medido en los registros de vuelos reales (2026-10-30 y la misión "Efrain" del 2026-11-03,
+  // batería estándar): el despegue, el regreso a casa y el aterrizaje.
+
+  /** El despegue automático de DJI hasta `TAKEOFF_ALTITUDE` m (3 s) y tomar el control (1 s). */
+  TAKEOFF: 4,
+  /** Hasta dónde sube el despegue automático de DJI (m); de ahí sube el piloto automático. */
+  TAKEOFF_ALTITUDE: 1.2,
+  /** Soltar el control al terminar, hasta que DJI empieza a regresar o a aterrizar. */
+  RELEASE: 2,
+  /** El regreso de DJI: antes de salir gira quieto hacia casa. */
+  RTH_TURN: 3,
+  /** El regreso de DJI sube al menos hasta aquí (la altura mínima de regreso de DJI; el 2026-11-03 subió de 15 a 20.9 m). */
+  RTH_ALTITUDE: 20,
+  /** Más cerca de casa que esto, suponemos que DJI ya no gira ni sube: solo aterriza (sin medir). */
+  RTH_NEAR: 5,
+  /** El regreso de DJI arranca desde quieto y acelera y frena más suave que el piloto automático (m/s²). */
+  RTH_ACCELERATION: 1,
+  /** Al llegar sobre casa, gira y se acomoda antes de bajar. */
+  LANDING_ALIGN: 3,
+  /** El aterrizaje de DJI baja a unos 1.5 m/s (en promedio) hasta `LANDING_SLOW_HEIGHT` m… */
+  LANDING_SPEED: 1.5,
+  LANDING_SLOW_HEIGHT: 3,
+  /** …y los últimos metros los baja despacio, revisando el suelo (14 a 20 s en los vuelos medidos). */
+  LANDING_SLOW_SECONDS: 17,
+
+  /** El regreso de DJI en línea recta: `length` m a `speed` m/s, desde quieto hasta quieto. */
+  rthFlight(length, speed) {
+    if (length <= 0) return 0;
+    const a = MotionTimes.RTH_ACCELERATION;
+    const v = Math.min(MotionTimes.MAX_SPEED, Math.max(0.3, speed));
+    return length >= (v * v) / a ? length / v + v / a : 2 * Math.sqrt(length / a);
+  },
+
+  /**
+   * El regreso a casa de DJI desde `length` m y `altitude` m: suelta el control, gira hacia casa
+   * y vuelve mientras sube a su altura de regreso (sin el aterrizaje, que es `landing`).
+   */
+  goHome(length, altitude, speed) {
+    if (length < MotionTimes.RTH_NEAR) return MotionTimes.RELEASE;
+    return (
+      MotionTimes.RELEASE +
+      MotionTimes.RTH_TURN +
+      Math.max(MotionTimes.rthFlight(length, speed), MotionTimes.climb(Math.max(0, MotionTimes.RTH_ALTITUDE - altitude)))
+    );
+  },
+
+  /** La altura sobre casa al terminar `goHome`. */
+  homeAltitude: (length, altitude) => (length < MotionTimes.RTH_NEAR ? altitude : Math.max(altitude, MotionTimes.RTH_ALTITUDE)),
+
+  /** El aterrizaje automático de DJI desde `height` m hasta que paran los motores. */
+  landing(height) {
+    if (height <= 0) return 0;
+    return (
+      Math.max(0, height - MotionTimes.LANDING_SLOW_HEIGHT) / MotionTimes.LANDING_SPEED +
+      MotionTimes.LANDING_SLOW_SECONDS * Math.min(1, height / MotionTimes.LANDING_SLOW_HEIGHT)
+    );
+  },
 };
 
 /** Diferencia más corta entre dos rumbos, de -180 a 180. */
@@ -2150,7 +2209,8 @@ export const PlanPlanner = {
     const items = [];
     const transits = [];
     let position = takeoff;
-    let altitude = 0;
+    // El piloto automático sube desde donde lo deja el despegue de DJI.
+    let altitude = takeoff ? MotionTimes.TAKEOFF_ALTITUDE : 0;
     let flown = 0;
     let durationSeconds = 0;
     let lengthMeters = 0;
@@ -2166,8 +2226,7 @@ export const PlanPlanner = {
       const horizontal = Geo.pathLength([from, ...via, to]);
       const seconds =
         kind === "home"
-          ? // El regreso lo vuela DJI, no el piloto automático.
-            horizontal / plan.transitSpeed + Math.abs(toAltitude - fromAltitude) / VERTICAL_SPEED
+          ? homeSeconds([from, ...via, to], fromAltitude, plan.transitSpeed)
           : transitSeconds([from, ...via, to], cruise - fromAltitude, cruise - toAltitude, plan.transitSpeed);
       const t = { from, to, fromAltitude, toAltitude, kind, lengthMeters: horizontal, durationSeconds: seconds, via };
       transits.push(t);
@@ -2193,15 +2252,31 @@ export const PlanPlanner = {
     });
 
     let home = null;
+    // landingSeconds: el aterrizaje de DJI al final, después del regreso a casa o, con Aterrizar, donde termina.
     let landingSeconds = 0;
     if (flown > 0 && plan.finishAction === "GO_HOME" && takeoff) home = transit(position, takeoff, altitude, 0, "home");
-    if (flown > 0 && plan.finishAction === "LAND") {
-      landingSeconds = altitude / VERTICAL_SPEED;
-      durationSeconds += landingSeconds;
-    }
-    return { takeoff, items, transits, home, landingSeconds, flown, durationSeconds, lengthMeters, photoCount };
+    if (home) landingSeconds = MotionTimes.LANDING_ALIGN + MotionTimes.landing(homeAltitude(transitPath(home), altitude));
+    else if (flown > 0 && plan.finishAction === "LAND") landingSeconds = MotionTimes.RELEASE + MotionTimes.landing(altitude);
+    // takeoffSeconds: el despegue automático de DJI, antes del primer tránsito.
+    const takeoffSeconds = flown > 0 && takeoff ? MotionTimes.TAKEOFF : 0;
+    durationSeconds += landingSeconds + takeoffSeconds;
+    return { takeoff, items, transits, home, landingSeconds, takeoffSeconds, flown, durationSeconds, lengthMeters, photoCount };
   },
 };
+
+/**
+ * El regreso a casa al terminar (sin el aterrizaje): DJI vuelve en línea recta, subiendo a su
+ * altura de regreso; si hay zonas en medio (`path` con más de dos puntos), el piloto automático
+ * vuelve rodeándolas a `altitude` y DJI ya solo aterriza.
+ */
+export function homeSeconds(path, altitude, speed) {
+  if (path.length > 2) return transitLegs(path, speed).reduce((sum, leg) => sum + leg.seconds, 0) + MotionTimes.goHome(0, altitude, speed);
+  return MotionTimes.goHome(Geo.distance(path[0], path.at(-1)), altitude, speed);
+}
+
+/** La altura sobre casa cuando DJI empieza a aterrizar, después de `homeSeconds`. */
+export const homeAltitude = (path, altitude) =>
+  path.length > 2 ? altitude : MotionTimes.homeAltitude(Geo.distance(path[0], path.at(-1)), altitude);
 
 /**
  * Un tránsito como lo vuela el piloto automático (FlightCompiler.transit): sube `climb` m donde
@@ -3056,6 +3131,12 @@ export const FlightPreview = {
     };
 
     let here = result.takeoff ? { position: result.takeoff, altitude: 0 } : null;
+    // El despegue automático de DJI, hasta donde lo toma el piloto automático.
+    if (here && result.takeoffSeconds > 0) {
+      const up = { ...here, altitude: MotionTimes.TAKEOFF_ALTITUDE };
+      push(here, up, result.takeoffSeconds, { label: "Despegando", kind: "transit" });
+      here = up;
+    }
     for (const item of result.items) {
       const { component, result: route } = item;
       if (!component.enabled || !route) continue;
@@ -3164,13 +3245,27 @@ export const FlightPreview = {
       here = points.at(-1);
     }
     if (here && result.home) {
-      const home = { position: result.takeoff, altitude: here.altitude };
       const info = { label: "Regreso al despegue", kind: "transit" };
-      const path = transitPath(result.home);
-      for (let i = 1; i < path.length; i++) {
-        push({ position: path[i - 1], altitude: here.altitude }, { position: path[i], altitude: here.altitude }, Geo.distance(path[i - 1], path[i]) / plan.transitSpeed, info);
+      const start = time;
+      let at = here;
+      if (result.home.via.length) {
+        // El piloto automático vuelve rodeando las zonas; DJI solo aterriza.
+        for (const leg of transitLegs(transitPath(result.home), plan.transitSpeed)) {
+          const from = { position: leg.from, altitude: here.altitude };
+          push(from, from, leg.turn, { ...info, spinTo: Geo.bearing(leg.from, leg.to) });
+          push(from, { position: leg.to, altitude: here.altitude }, leg.seconds - leg.turn, { ...info, cruise: plan.transitSpeed });
+        }
+        at = { position: result.takeoff, altitude: here.altitude };
+        push(at, at, MotionTimes.RELEASE, info);
+      } else {
+        // DJI: suelta el control, gira hacia casa y vuelve subiendo a su altura de regreso.
+        const length = Geo.distance(here.position, result.takeoff);
+        push(here, here, MotionTimes.RELEASE, info);
+        if (length >= MotionTimes.RTH_NEAR) push(here, here, MotionTimes.RTH_TURN, { ...info, spinTo: Geo.bearing(here.position, result.takeoff) });
+        at = { position: result.takeoff, altitude: MotionTimes.homeAltitude(length, here.altitude) };
+        push(here, at, result.home.durationSeconds - (time - start), info);
       }
-      push(home, { ...home, altitude: 0 }, home.altitude / VERTICAL_SPEED, { ...info, label: "Aterrizando" });
+      push(at, { ...at, altitude: 0 }, result.landingSeconds, { ...info, label: "Aterrizando" });
     } else if (here && result.landingSeconds > 0) {
       push(here, { ...here, altitude: 0 }, result.landingSeconds, { label: "Aterrizando", kind: "transit" });
     }
